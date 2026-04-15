@@ -196,6 +196,7 @@ function App() {
     <main className="app-shell">
       <header className="app-header">
         <h1>Email Auto Sender</h1>
+        <h3> I know buddy job ni lagri, meri bhi ni lgri jb bnaya h ye :( </h3>
         <p>Send one message to many recipients using your Google account.</p>
       </header>
 
