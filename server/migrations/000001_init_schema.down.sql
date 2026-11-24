@@ -1,0 +1,9 @@
+-- 000001_init_schema.down.sql
+
+DROP TABLE IF EXISTS replies;
+DROP TABLE IF EXISTS outreach;
+DROP TABLE IF EXISTS contacts;
+DROP TABLE IF EXISTS posts;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS settings;
+DROP TABLE IF EXISTS profile;
