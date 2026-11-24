@@ -7,11 +7,52 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Node & Frontend Build
 node_modules
 dist
 dist-ssr
 *.local
+
+# Secrets and Environment Variables (Strictly Never Commit)
 .env
+.env.*
+*.env
+server/.env
+server/.env.*
+worker/.env
+worker/.env.*
+
+# Local Chrome User Data & Playwright Sessions (Contains LinkedIn cookies)
+worker/user_data/
+worker/user_data
+user_data/
+
+# Uploaded Files & Resumes (Contains private candidate documents)
+uploads/
+server/uploads/
+server/uploads
+
+# Go build binaries & test artifacts
+server/bin/
+server/tmp/
+*.exe
+*.test
+*.prof
+
+# Keys, certificates, credentials
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+.credentials
+
+# Docker local overrides
+docker-compose.override.yml
+
+# Test coverage
+coverage/
+*.lcov
 
 # Editor directories and files
 .vscode/*
