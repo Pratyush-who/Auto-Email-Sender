@@ -4,18 +4,36 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
 // Config holds runtime configuration loaded from environment variables and .env
 type Config struct {
-	Port                string
-	DatabaseURL         string
-	CORSAllowedOrigins  []string
-	LogLevel            string
-	Environment         string
-	MigrateOnStartup    bool
+	Port               string
+	DatabaseURL        string
+	CORSAllowedOrigins []string
+	LogLevel           string
+	Environment        string
+	MigrateOnStartup   bool
+	UploadDir          string
+
+	// LLM / Gemini configuration
+	GeminiAPIKey  string
+	GeminiModel   string
+	GeminiRPM     int
+	GeminiTimeout time.Duration
+
+	// Google OAuth 2.0 configuration
+	GoogleClientID     string
+	GoogleClientSecret string
+	GoogleRedirectURL  string
+	EncryptionKey      string
+	FrontendURL        string
+
+	// Worker configuration
+	WorkerURL string
 }
 
 // Load loads configuration from environment, with optional .env loading.
@@ -30,6 +48,20 @@ func Load() *Config {
 	logLevel := strings.ToLower(getEnv("LOG_LEVEL", "info"))
 	environment := strings.ToLower(getEnv("ENV", getEnv("APP_ENV", "development")))
 	migrateOnStartup := getEnvBool("MIGRATE_ON_STARTUP", true)
+	uploadDir := getEnv("UPLOAD_DIR", "./uploads")
+
+	geminiAPIKey := getEnv("GEMINI_API_KEY", "")
+	geminiModel := getEnv("GEMINI_MODEL", "gemini-2.5-flash")
+	geminiRPM := getEnvInt("GEMINI_RPM", 30)
+	geminiTimeoutSec := getEnvInt("GEMINI_TIMEOUT_SECONDS", 30)
+
+	googleClientID := getEnv("GOOGLE_CLIENT_ID", "")
+	googleClientSecret := getEnv("GOOGLE_CLIENT_SECRET", "")
+	googleRedirectURL := getEnv("GOOGLE_REDIRECT_URL", "http://localhost:8080/auth/callback")
+	encryptionKey := getEnv("ENCRYPTION_KEY", "emailauto-default-encryption-secret-key-32b")
+	frontendURL := getEnv("FRONTEND_URL", "http://localhost:5173")
+
+	workerURL := getEnv("WORKER_URL", "http://localhost:3001")
 
 	var origins []string
 	for _, o := range strings.Split(originsStr, ",") {
@@ -49,6 +81,17 @@ func Load() *Config {
 		LogLevel:           logLevel,
 		Environment:        environment,
 		MigrateOnStartup:   migrateOnStartup,
+		UploadDir:          uploadDir,
+		GeminiAPIKey:       geminiAPIKey,
+		GeminiModel:        geminiModel,
+		GeminiRPM:          geminiRPM,
+		GeminiTimeout:      time.Duration(geminiTimeoutSec) * time.Second,
+		GoogleClientID:     googleClientID,
+		GoogleClientSecret: googleClientSecret,
+		GoogleRedirectURL:  googleRedirectURL,
+		EncryptionKey:      encryptionKey,
+		FrontendURL:        frontendURL,
+		WorkerURL:          workerURL,
 	}
 }
 
@@ -62,6 +105,16 @@ func getEnv(key, fallback string) string {
 func getEnvBool(key string, fallback bool) bool {
 	if val, ok := os.LookupEnv(key); ok && strings.TrimSpace(val) != "" {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(val))
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if val, ok := os.LookupEnv(key); ok && strings.TrimSpace(val) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(val))
 		if err == nil {
 			return parsed
 		}

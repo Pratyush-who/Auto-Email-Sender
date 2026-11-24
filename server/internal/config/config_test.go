@@ -12,6 +12,15 @@ func TestConfigDefaults(t *testing.T) {
 	os.Unsetenv("CORS_ALLOWED_ORIGINS")
 	os.Unsetenv("LOG_LEVEL")
 	os.Unsetenv("ENV")
+	os.Unsetenv("GEMINI_API_KEY")
+	os.Unsetenv("GEMINI_MODEL")
+	os.Unsetenv("GEMINI_RPM")
+	os.Unsetenv("GEMINI_TIMEOUT_SECONDS")
+	os.Unsetenv("GOOGLE_CLIENT_ID")
+	os.Unsetenv("GOOGLE_CLIENT_SECRET")
+	os.Unsetenv("GOOGLE_REDIRECT_URL")
+	os.Unsetenv("ENCRYPTION_KEY")
+	os.Unsetenv("FRONTEND_URL")
 
 	cfg := Load()
 
@@ -30,6 +39,15 @@ func TestConfigDefaults(t *testing.T) {
 	if !cfg.MigrateOnStartup {
 		t.Errorf("expected MigrateOnStartup to default to true")
 	}
+	if cfg.GeminiModel != "gemini-2.5-flash" {
+		t.Errorf("expected default gemini model gemini-2.5-flash, got %s", cfg.GeminiModel)
+	}
+	if cfg.GoogleRedirectURL != "http://localhost:8080/auth/callback" {
+		t.Errorf("expected default google redirect url, got %s", cfg.GoogleRedirectURL)
+	}
+	if cfg.EncryptionKey == "" {
+		t.Errorf("expected default encryption key")
+	}
 }
 
 func TestConfigCustomEnv(t *testing.T) {
@@ -39,6 +57,15 @@ func TestConfigCustomEnv(t *testing.T) {
 	t.Setenv("LOG_LEVEL", "debug")
 	t.Setenv("ENV", "production")
 	t.Setenv("MIGRATE_ON_STARTUP", "false")
+	t.Setenv("GEMINI_API_KEY", "test-api-key")
+	t.Setenv("GEMINI_MODEL", "gemini-1.5-flash")
+	t.Setenv("GEMINI_RPM", "60")
+	t.Setenv("GEMINI_TIMEOUT_SECONDS", "45")
+	t.Setenv("GOOGLE_CLIENT_ID", "test-client-id")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "test-secret")
+	t.Setenv("GOOGLE_REDIRECT_URL", "http://localhost:8080/custom/callback")
+	t.Setenv("ENCRYPTION_KEY", "custom-secret-key-1234567890123456")
+	t.Setenv("FRONTEND_URL", "http://localhost:3000")
 
 	cfg := Load()
 
@@ -59,5 +86,14 @@ func TestConfigCustomEnv(t *testing.T) {
 	}
 	if cfg.MigrateOnStartup {
 		t.Errorf("expected MigrateOnStartup to be false")
+	}
+	if cfg.GoogleClientID != "test-client-id" {
+		t.Errorf("expected google client id 'test-client-id', got %s", cfg.GoogleClientID)
+	}
+	if cfg.GoogleClientSecret != "test-secret" {
+		t.Errorf("expected google client secret 'test-secret', got %s", cfg.GoogleClientSecret)
+	}
+	if cfg.GoogleRedirectURL != "http://localhost:8080/custom/callback" {
+		t.Errorf("expected google redirect url, got %s", cfg.GoogleRedirectURL)
 	}
 }
