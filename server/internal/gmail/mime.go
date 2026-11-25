@@ -76,6 +76,7 @@ func BuildRawMIME(to, subject, body string, attachments []Attachment, inReplyTo,
 
 	var parts []string
 	parts = append(parts, strings.Join(headers, crlf))
+	parts = append(parts, "") // RFC 2822 required empty line separating headers from MIME parts
 	parts = append(parts, bodyPart)
 	parts = append(parts, attachmentParts...)
 	parts = append(parts, fmt.Sprintf("--%s--", boundary))

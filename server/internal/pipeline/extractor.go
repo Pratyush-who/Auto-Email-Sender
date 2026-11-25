@@ -73,38 +73,131 @@ func FilterAndDeduplicateEmails(emails []string) []string {
 	return nonGeneric
 }
 
-// ExtractPost analyzes post text using the LLM client with JSON schema and validates email addresses.
-func (e *PostExtractor) ExtractPost(ctx context.Context, postText string) (*PostExtractionResult, error) {
-	if e.llmClient == nil {
-		return nil, fmt.Errorf("llm client is not configured")
+// ExtractPhonesWithRegex scans text and extracts all phone numbers and WhatsApp links.
+func ExtractPhonesWithRegex(text string) []string {
+	var results []string
+	seen := make(map[string]bool)
+
+	// Check for wa.me links
+	waRegex := regexp.MustCompile(`(?i)wa\.me/(\+?[0-9]{10,15})`)
+	for _, m := range waRegex.FindAllStringSubmatch(text, -1) {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			results = append(results, m[1])
+		}
 	}
 
-	prompt := fmt.Sprintf(`You are an expert recruiter and job scraper parser.
-Analyze the following LinkedIn post and extract structured data strictly conforming to the JSON schema.
+	// Indian mobile numbers (10 digits starting with 6,7,8,9, optionally prefixed with +91 or 0)
+	inPhoneRegex := regexp.MustCompile(`(?:(?:\+|00)91[\s.-]?|[0])?([6-9]\d{4}[\s.-]?\d{5})`)
+	for _, m := range inPhoneRegex.FindAllStringSubmatch(text, -1) {
+		if len(m) > 1 {
+			cleaned := strings.Map(func(r rune) rune {
+				if r >= '0' && r <= '9' {
+					return r
+				}
+				return -1
+			}, m[0])
+			if len(cleaned) >= 10 && len(cleaned) <= 13 && !seen[cleaned] {
+				seen[cleaned] = true
+				results = append(results, cleaned)
+			}
+		}
+	}
 
-RULES:
-1. is_hiring_post: set true if the post is advertising an open job, internship, contract, or hiring need. Set false if it is personal news, general advice, celebratory, or promotional.
-2. emails: extract all contact email addresses mentioned for applying.
-3. company: name of the hiring company or startup (infer from context or poster description if not explicit).
-4. role: specific job title or role mentioned (e.g. "Go Backend Engineer", "React Developer").
-5. work_mode: choose from "remote", "onsite", "hybrid", "unknown".
-6. location: city, region, or "Remote".
-7. experience_required: description of experience level. If numeric years can be deduced, provide experience_years as a float.
-8. tech_stack: array of programming languages, frameworks, and technologies mentioned.
-9. paid_status: must be "paid", "unpaid", or "unknown".
-   CRITICAL: If the post mentions "unpaid", "no stipend", "stipend: none", "unpaid internship", "for exposure", "exposure", "for experience", or "volunteer", you MUST set paid_status to "unpaid".
-10. stipend_text: exact stipend or salary text if mentioned, and stipend_amount as a numeric monthly figure if parseable.
-11. apply_instructions: summary of how to apply.
-12. required_subject_line: if the poster specifies a required email subject line (e.g. "Subject: Application for Go Dev - [Name]"), extract the exact pattern.
-13. apply_via_email: true if an email address is provided or requested for applications.
-14. is_suspicious: set true if post asks for payment/training fees/security deposits, promotes MLM/pyramid schemes, uses crypto phishing, or appears to be a fraudulent fake job scam.
-15. suspicion_reason: explanation if the post is deemed suspicious or fake.
+	return results
+}
 
-Post Text:
-"""
-%s
-"""`, postText)
+// ExtractPostWithRegex provides fast deterministic regex and heuristic parsing with zero LLM API calls.
+func ExtractPostWithRegex(postText string) *PostExtractionResult {
+	emails := ExtractEmailsWithRegex(postText)
+	phones := ExtractPhonesWithRegex(postText)
+	lowerText := strings.ToLower(postText)
 
+	isHiring := false
+	hiringTerms := []string{
+		"hiring", "looking for", "job", "opening", "we are seeking",
+		"apply", "reach out", "send your resume", "internship", "developer", "engineer",
+	}
+	for _, term := range hiringTerms {
+		if strings.Contains(lowerText, term) {
+			isHiring = true
+			break
+		}
+	}
+
+	workMode := "unknown"
+	if strings.Contains(lowerText, "remote") {
+		workMode = "remote"
+	} else if strings.Contains(lowerText, "hybrid") {
+		workMode = "hybrid"
+	} else if strings.Contains(lowerText, "onsite") || strings.Contains(lowerText, "on-site") {
+		workMode = "onsite"
+	}
+
+	paidStatus := "unknown"
+	unpaidIndicators := []string{"unpaid", "no stipend", "for exposure", "for experience", "volunteer"}
+	for _, ind := range unpaidIndicators {
+		if strings.Contains(lowerText, ind) {
+			paidStatus = "unpaid"
+			break
+		}
+	}
+	if paidStatus != "unpaid" && (strings.Contains(lowerText, "stipend") || strings.Contains(lowerText, "salary") || strings.Contains(lowerText, "lpa") || strings.Contains(lowerText, "per month") || strings.Contains(lowerText, "k/mo")) {
+		paidStatus = "paid"
+	}
+
+	// Try extracting role from known titles
+	role := "Software Developer"
+	knownRoles := []string{
+		"Flutter Developer", "Flutter App Developer", "Go Developer", "Golang Developer",
+		"Backend Developer", "Frontend Developer", "Full Stack Developer", "Android Developer",
+		"iOS Developer", "Software Engineer",
+	}
+	for _, kr := range knownRoles {
+		if strings.Contains(lowerText, strings.ToLower(kr)) {
+			role = kr
+			break
+		}
+	}
+
+	company := ""
+	if len(emails) > 0 {
+		parts := strings.Split(emails[0], "@")
+		if len(parts) == 2 {
+			domainParts := strings.Split(parts[1], ".")
+			if len(domainParts) >= 2 && domainParts[0] != "gmail" && domainParts[0] != "yahoo" && domainParts[0] != "outlook" && domainParts[0] != "hotmail" {
+				company = strings.ToUpper(string(domainParts[0][0])) + domainParts[0][1:]
+			}
+		}
+	}
+
+	return &PostExtractionResult{
+		IsHiringPost:      isHiring,
+		Emails:            emails,
+		Phones:            phones,
+		Company:           company,
+		Role:              role,
+		WorkMode:          workMode,
+		PaidStatus:        paidStatus,
+		ApplyViaEmail:     len(emails) > 0,
+		ApplyInstructions: "Apply via email or contact details in post",
+	}
+}
+
+// ExtractPost analyzes post text using fast regex pre-filtering and optional LLM enrichment with fallback.
+func (e *PostExtractor) ExtractPost(ctx context.Context, postText string) (*PostExtractionResult, error) {
+	regexEmails := ExtractEmailsWithRegex(postText)
+	regexPhones := ExtractPhonesWithRegex(postText)
+
+	if len(regexEmails) == 0 && len(regexPhones) == 0 {
+		return ExtractPostWithRegex(postText), nil
+	}
+
+	if e.llmClient == nil {
+		return ExtractPostWithRegex(postText), nil
+	}
+
+	prompt := fmt.Sprintf(`Extract structured data strictly conforming to JSON schema from: %s`, postText)
 	schema := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -112,14 +205,14 @@ Post Text:
 			"emails":                map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"company":               map[string]any{"type": "string"},
 			"role":                  map[string]any{"type": "string"},
-			"work_mode":             map[string]any{"type": "string", "enum": []string{"remote", "onsite", "hybrid", "unknown"}},
+			"work_mode":             map[string]any{"type": "string"},
 			"location":              map[string]any{"type": "string"},
 			"experience_required":  map[string]any{"type": "string"},
 			"experience_years":     map[string]any{"type": "number"},
 			"tech_stack":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"stipend_text":         map[string]any{"type": "string"},
 			"stipend_amount":       map[string]any{"type": "number"},
-			"paid_status":          map[string]any{"type": "string", "enum": []string{"paid", "unpaid", "unknown"}},
+			"paid_status":          map[string]any{"type": "string"},
 			"apply_instructions":   map[string]any{"type": "string"},
 			"required_subject_line": map[string]any{"type": "string"},
 			"apply_via_email":       map[string]any{"type": "boolean"},
@@ -131,40 +224,20 @@ Post Text:
 
 	var result PostExtractionResult
 	if err := e.llmClient.GenerateJSON(ctx, prompt, schema, &result); err != nil {
-		return nil, fmt.Errorf("llm post extraction failed: %w", err)
+		return ExtractPostWithRegex(postText), nil
 	}
 
-	// Cross-check emails with regex against the raw post text
-	regexEmails := ExtractEmailsWithRegex(postText)
-	combinedEmails := append(result.Emails, regexEmails...)
-	result.Emails = FilterAndDeduplicateEmails(combinedEmails)
-
+	result.Phones = regexPhones
+	result.Emails = FilterAndDeduplicateEmails(append(result.Emails, regexEmails...))
 	if len(result.Emails) > 0 {
 		result.ApplyViaEmail = true
 	}
 
-	// Extra safety check for unpaid keywords in post text
 	lowerText := strings.ToLower(postText)
-	unpaidIndicators := []string{"unpaid", "no stipend", "for exposure", "for experience", "volunteer"}
+	unpaidIndicators := []string{"unpaid", "no stipend", "for exposure", "exposure", "for experience", "volunteer"}
 	for _, ind := range unpaidIndicators {
 		if strings.Contains(lowerText, ind) {
 			result.PaidStatus = "unpaid"
-			break
-		}
-	}
-
-	// Heuristic scam & fake job indicators
-	scamIndicators := []string{
-		"registration fee", "pay application fee", "application fee",
-		"security deposit", "deposit for laptop", "wire money",
-		"pay to apply", "training fee",
-	}
-	for _, scam := range scamIndicators {
-		if strings.Contains(lowerText, scam) {
-			result.IsSuspicious = true
-			if result.SuspicionReason == "" {
-				result.SuspicionReason = fmt.Sprintf("contains fraudulent scam indicator: '%s'", scam)
-			}
 			break
 		}
 	}

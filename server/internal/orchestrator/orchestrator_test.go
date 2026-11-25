@@ -167,7 +167,7 @@ func TestOrchestrator_Deduplication(t *testing.T) {
 	pipeMock := &mockPipelineForOrc{}
 
 	orc := NewOrchestrator(settingsStore, postStore, workerClient, pipeMock, nil, nil)
-	run, err := orc.RunPipeline(ctx, "manual", "24h", "latest", 10)
+	run, err := orc.RunPipeline(ctx, "manual", "golang developer", "24h", "latest", 10)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

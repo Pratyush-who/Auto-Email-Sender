@@ -205,7 +205,7 @@ func (o *Orchestrator) Start() {
 				ctx := context.Background()
 				if o.ShouldAutoRun(ctx) {
 					o.logger.Info("triggering scheduled 2-hour autonomous pipeline run")
-					_, err := o.RunPipeline(ctx, "auto", "24h", "latest", 60)
+					_, err := o.RunPipeline(ctx, "auto", "", "24h", "latest", 60)
 					if err != nil {
 						o.logger.Error("error during autonomous pipeline run", "error", err)
 					}
@@ -370,6 +370,7 @@ func (o *Orchestrator) GetStatus(ctx context.Context) (*OrchestratorStatus, erro
 func (o *Orchestrator) RunPipeline(
 	ctx context.Context,
 	trigger string,
+	query string,
 	timeFilter string,
 	sortBy string,
 	maxPosts int,
@@ -410,7 +411,7 @@ func (o *Orchestrator) RunPipeline(
 		sortBy = "latest"
 	}
 	if maxPosts <= 0 {
-		maxPosts = 60
+		maxPosts = 150
 	}
 
 	// 1. Load active settings
@@ -425,13 +426,17 @@ func (o *Orchestrator) RunPipeline(
 		settings = model.DefaultSettings()
 	}
 
-	query := "golang or react engineer"
-	if len(settings.IncludeKeywords) > 0 {
-		query = strings.Join(settings.IncludeKeywords, " ")
+	searchQuery := strings.TrimSpace(query)
+	if searchQuery == "" {
+		if len(settings.IncludeKeywords) > 0 {
+			searchQuery = strings.Join(settings.IncludeKeywords, " ")
+		} else {
+			searchQuery = "golang or react engineer"
+		}
 	}
 
 	runRecord := &model.Run{
-		Query:      query,
+		Query:      searchQuery,
 		TimeFilter: timeFilter,
 		SortBy:     sortBy,
 		Trigger:    trigger,
@@ -449,20 +454,29 @@ func (o *Orchestrator) RunPipeline(
 
 	// 2. Scrape posts from worker
 	if o.workerClient == nil {
-		o.finishRun(ctx, runRecord, "failed", map[string]any{"error": "worker client not configured"})
+		o.finishRun(ctx, runRecord, "failed", map[string]any{"error": "worker client not configured", "issue": "worker client not configured"})
 		return runRecord, fmt.Errorf("worker client not configured")
 	}
 
 	scrapeRes, err := o.workerClient.Scrape(ctx, worker.ScrapeRequest{
-		Query:      query,
+		Query:      searchQuery,
 		TimeFilter: timeFilter,
 		SortBy:     sortBy,
 		MaxPosts:   maxPosts,
 	})
 
 	if err != nil {
-		o.finishRun(ctx, runRecord, "failed", map[string]any{"error": err.Error()})
-		return runRecord, fmt.Errorf("scraping failed: %w", err)
+		errMsg := err.Error()
+		issue := errMsg
+		lowerErr := strings.ToLower(errMsg)
+		if strings.Contains(lowerErr, "login wall") || strings.Contains(lowerErr, "captcha") || strings.Contains(lowerErr, "verification url") || strings.Contains(lowerErr, "uas/login") {
+			issue = "LinkedIn Login Required: The scraper was redirected to the LinkedIn login/verification screen. Please open the Chrome browser window, log into your LinkedIn account, and re-run."
+		}
+		o.finishRun(ctx, runRecord, "failed", map[string]any{
+			"error": errMsg,
+			"issue": issue,
+		})
+		return runRecord, fmt.Errorf("%s", issue)
 	}
 
 	// 3. Process & dedupe posts

@@ -31,7 +31,7 @@ type OutreachStore interface {
 	GetPendingOutreachToSend(ctx context.Context, limit int) ([]model.Outreach, error)
 	CountSentToday(ctx context.Context) (int, error)
 	HasSentToAddressOrCompanyWithinDays(ctx context.Context, email, company string, days int) (bool, error)
-	HasExistingInitialOutreach(ctx context.Context, contactID string) (bool, error)
+	HasExistingInitialOutreach(ctx context.Context, contactID string, excludeID ...string) (bool, error)
 	UpdateStatus(ctx context.Context, id string, status model.OutreachStatus, gmailMsgID, gmailThreadID, errText string, sentAt *time.Time) error
 	MarkContactInvalid(ctx context.Context, contactID string, reason string) error
 	ListOutreach(ctx context.Context, filter model.OutreachFilter) ([]model.Outreach, error)
@@ -74,6 +74,7 @@ type SendResult struct {
 // Sender orchestrates queue processing, guardrail enforcement, and dispatching.
 type Sender struct {
 	mu            sync.RWMutex
+	sendMu        sync.Mutex
 	state         SenderStatus
 	pauseReason   string
 	pausedUntil   *time.Time
@@ -197,7 +198,11 @@ func (s *Sender) GetStatus(ctx context.Context) (*StatusReport, error) {
 }
 
 // SendNext picks the next approved/queued outreach and attempts to send it while enforcing all guardrails.
-func (s *Sender) SendNext(ctx context.Context) (*SendResult, error) {
+// If force is true, it bypasses the send_window restrictions (used for manual on-demand dispatches).
+func (s *Sender) SendNext(ctx context.Context, force bool) (*SendResult, error) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
 	s.mu.Lock()
 	if s.state == SenderStatusPaused {
 		// Check if pausedUntil expired
@@ -231,11 +236,13 @@ func (s *Sender) SendNext(ctx context.Context) (*SendResult, error) {
 
 	now := s.nowFunc()
 
-	// 2. Enforce send_window (default 09:00-19:00 IST)
-	inWindow, winReason := IsWithinSendWindow(now, settings.SendWindow)
-	if !inWindow {
-		s.logger.Info("send skipped: outside send window", "reason", winReason)
-		return &SendResult{Skipped: true, Reason: winReason}, nil
+	// 2. Enforce send_window (default 09:00-19:00 IST) unless forced by manual dispatch
+	if !force {
+		inWindow, winReason := IsWithinSendWindow(now, settings.SendWindow)
+		if !inWindow {
+			s.logger.Info("send skipped: outside send window", "reason", winReason)
+			return &SendResult{Skipped: true, Reason: winReason}, nil
+		}
 	}
 
 	// 3. Enforce daily_cap (default 30)
@@ -262,9 +269,9 @@ func (s *Sender) SendNext(ctx context.Context) (*SendResult, error) {
 
 	target := pending[0]
 
-	// 5. Guardrail: Never send initial if one exists/sent for this contact
+	// 5. Guardrail: Never send initial if another initial exists or was already sent for this contact
 	if target.Kind == model.OutreachKindInitial {
-		hasExisting, err := s.outreachStore.HasExistingInitialOutreach(ctx, target.ContactID)
+		hasExisting, err := s.outreachStore.HasExistingInitialOutreach(ctx, target.ContactID, target.ID)
 		if err == nil && hasExisting {
 			reason := "initial outreach already exists or was sent for this contact"
 			s.logger.Warn("skipping outreach", "outreach_id", target.ID, "reason", reason)
@@ -308,7 +315,12 @@ func (s *Sender) SendNext(ctx context.Context) (*SendResult, error) {
 
 	// 8. Dispatch email via Gmail
 	if s.mailer == nil {
-		return nil, fmt.Errorf("mailer service is not initialized")
+		return &SendResult{
+			OutreachID: target.ID,
+			Sent:       false,
+			Skipped:    true,
+			Reason:     "Google account not connected: Connect your Gmail account in Settings & Profile to send real emails",
+		}, nil
 	}
 
 	msgID, threadID, sendErr := s.mailer.SendMail(
@@ -325,6 +337,15 @@ func (s *Sender) SendNext(ctx context.Context) (*SendResult, error) {
 		s.logger.Error("failed to send email via gmail", "outreach_id", target.ID, "error", sendErr)
 		errStr := sendErr.Error()
 		errLower := strings.ToLower(errStr)
+
+		if strings.Contains(errLower, "google account is not connected") || strings.Contains(errLower, "please connect first") {
+			return &SendResult{
+				OutreachID: target.ID,
+				Sent:       false,
+				Skipped:    true,
+				Reason:     "Google account not connected: Connect your Gmail account in Settings & Profile to send real emails",
+			}, nil
+		}
 
 		// 429 / Quota Exceeded -> Pause till next day
 		if strings.Contains(errLower, "429") || strings.Contains(errLower, "quota") || strings.Contains(errLower, "ratelimit") {
@@ -396,9 +417,11 @@ func (s *Sender) SendNext(ctx context.Context) (*SendResult, error) {
 	if gapMax > gapMin {
 		gapMinutes += s.randIntn(gapMax - gapMin + 1)
 	}
-	gapDuration := time.Duration(gapMinutes) * time.Minute
-	s.logger.Info("enforcing randomized pacing gap before next send", "minutes", gapMinutes)
-	s.sleepFunc(gapDuration)
+	if !force && gapMinutes > 0 {
+		gapDuration := time.Duration(gapMinutes) * time.Minute
+		s.logger.Info("enforcing randomized pacing gap before next background send", "minutes", gapMinutes)
+		s.sleepFunc(gapDuration)
+	}
 
 	return &SendResult{
 		OutreachID:   target.ID,

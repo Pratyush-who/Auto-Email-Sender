@@ -34,6 +34,7 @@ type OutreachHandler struct {
 	outreachStore OutreachStore
 	profileStore  ProfileStore
 	postStore     PostStore
+	contactStore  ContactStore
 	composer      ComposerService
 }
 
@@ -42,12 +43,14 @@ func NewOutreachHandler(
 	outreachStore OutreachStore,
 	profileStore ProfileStore,
 	postStore PostStore,
+	contactStore ContactStore,
 	composer ComposerService,
 ) *OutreachHandler {
 	return &OutreachHandler{
 		outreachStore: outreachStore,
 		profileStore:  profileStore,
 		postStore:     postStore,
+		contactStore:  contactStore,
 		composer:      composer,
 	}
 }
@@ -203,6 +206,19 @@ func (h *OutreachHandler) GenerateOutreach(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Idempotency: If an outreach draft already exists for this PostID, return it directly to avoid duplicate drafts
+	if payload.PostID != "" && h.outreachStore != nil {
+		allOutreach, err := h.outreachStore.ListOutreach(r.Context(), model.OutreachFilter{Limit: 500})
+		if err == nil {
+			for _, o := range allOutreach {
+				if o.PostID == payload.PostID {
+					writeJSON(w, http.StatusOK, o)
+					return
+				}
+			}
+		}
+	}
+
 	profile, _ := h.profileStore.Get(r.Context())
 	if profile == nil {
 		profile = &model.Profile{}
@@ -217,6 +233,44 @@ func (h *OutreachHandler) GenerateOutreach(w http.ResponseWriter, r *http.Reques
 					post = p
 					break
 				}
+			}
+		}
+	}
+
+	// If ContactID is missing, resolve from existing contact or create from post extracted emails
+	if payload.ContactID == "" && h.contactStore != nil {
+		if post.ID != "" {
+			existingContacts, err := h.contactStore.GetContacts(r.Context(), 100)
+			if err == nil {
+				for _, c := range existingContacts {
+					if c.PostID == post.ID || (len(post.Extracted.Emails) > 0 && c.Email == post.Extracted.Emails[0]) {
+						payload.ContactID = c.ID
+						break
+					}
+				}
+			}
+		}
+
+		if payload.ContactID == "" && len(post.Extracted.Emails) > 0 {
+			primaryEmail := post.Extracted.Emails[0]
+			company := post.Company
+			if company == "" {
+				company = post.Role
+			}
+			domain := ""
+			if parts := strings.Split(primaryEmail, "@"); len(parts) == 2 {
+				domain = parts[1]
+			}
+			newContact, err := h.contactStore.SaveContact(r.Context(), &model.Contact{
+				Email:        primaryEmail,
+				Company:      company,
+				Domain:       domain,
+				TrustScore:   100,
+				TrustReasons: []string{"manually initiated outreach"},
+				PostID:       post.ID,
+			})
+			if err == nil && newContact != nil {
+				payload.ContactID = newContact.ID
 			}
 		}
 	}

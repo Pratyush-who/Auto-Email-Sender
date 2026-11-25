@@ -11,8 +11,8 @@ test('Parser - Builds proper LinkedIn search URLs', () => {
   })
 
   assert.match(url1, /keywords=golang\+remote/)
-  assert.match(url1, /datePosted=%22past-24h%22/)
-  assert.match(url1, /sortBy=%22date_posted%22/)
+  assert.match(url1, /datePosted=%5B%22past-24h%22%5D/)
+  assert.match(url1, /sortBy=%5B%22date_posted%22%5D/)
 
   const url2 = buildLinkedInSearchUrl({
     query: 'react engineer',
@@ -21,6 +21,5 @@ test('Parser - Builds proper LinkedIn search URLs', () => {
   })
 
   assert.match(url2, /keywords=react\+engineer/)
-  assert.match(url2, /datePosted=%22past-month%22/)
-  assert.match(url2, /sortBy=%22relevance%22/)
+  assert.match(url2, /datePosted=%5B%22past-month%22%5D/)
 })

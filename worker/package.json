@@ -5,6 +5,7 @@
   "description": "Headless/Headed Playwright worker for LinkedIn post extraction",
   "scripts": {
     "start": "node src/index.js",
+    "login": "node src/login.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

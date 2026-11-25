@@ -9,6 +9,7 @@ type PostExtracted struct {
 	Keywords            []string       `json:"keywords,omitempty"`
 	TechStack           []string       `json:"tech_stack,omitempty"`
 	Emails              []string       `json:"emails,omitempty"`
+	Phones              []string       `json:"phones,omitempty"`
 	RequiredSubjectLine string         `json:"required_subject_line,omitempty"`
 	ApplyInstructions   string         `json:"apply_instructions,omitempty"`
 	CompanySummary      string         `json:"company_summary,omitempty"`

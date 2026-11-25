@@ -52,7 +52,7 @@ func Load() *Config {
 
 	geminiAPIKey := getEnv("GEMINI_API_KEY", "")
 	geminiModel := getEnv("GEMINI_MODEL", "gemini-2.5-flash")
-	geminiRPM := getEnvInt("GEMINI_RPM", 30)
+	geminiRPM := getEnvInt("GEMINI_RPM", 4)
 	geminiTimeoutSec := getEnvInt("GEMINI_TIMEOUT_SECONDS", 30)
 
 	googleClientID := getEnv("GOOGLE_CLIENT_ID", "")

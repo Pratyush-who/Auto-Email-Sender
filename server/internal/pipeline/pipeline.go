@@ -31,7 +31,7 @@ type ProfileStore interface {
 type OutreachStore interface {
 	CreateOutreach(ctx context.Context, o *model.Outreach) (*model.Outreach, error)
 	GetSentBodiesToday(ctx context.Context) ([]string, error)
-	HasExistingInitialOutreach(ctx context.Context, contactID string) (bool, error)
+	HasExistingInitialOutreach(ctx context.Context, contactID string, excludeID ...string) (bool, error)
 }
 
 // ComposerService defines email drafting capabilities.
@@ -128,6 +128,7 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 
 	post.Extracted.TechStack = extracted.TechStack
 	post.Extracted.Emails = extracted.Emails
+	post.Extracted.Phones = extracted.Phones
 	post.Extracted.RequiredSubjectLine = extracted.RequiredSubjectLine
 	post.Extracted.ApplyInstructions = extracted.ApplyInstructions
 	if extracted.StipendAmount != nil {
@@ -197,12 +198,27 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 		post.Extracted.CompanySummary = verResult.CompanySummary
 		post.Extracted.RedFlags = verResult.RedFlags
 
-		// Explicit check for red flags detected during due diligence
-		if len(verResult.RedFlags) > 0 {
+		// Explicit check for severe scam/fraud keywords detected during due diligence
+		isDefinitiveScam := false
+		scamIndicators := []string{
+			"registration fee", "pay to apply", "processing fee", "deposit required",
+			"crypto payment", "wire transfer", "telegram task", "whatsapp task",
+		}
+		for _, rf := range verResult.RedFlags {
+			rfLower := strings.ToLower(rf)
+			for _, scamWord := range scamIndicators {
+				if strings.Contains(rfLower, scamWord) {
+					isDefinitiveScam = true
+					break
+				}
+			}
+		}
+
+		if isDefinitiveScam {
 			post.Extracted.IsSuspicious = true
-			post.Extracted.SuspicionReason = fmt.Sprintf("Red flags detected: %s", strings.Join(verResult.RedFlags, "; "))
+			post.Extracted.SuspicionReason = fmt.Sprintf("Fraudulent activity flagged: %s", strings.Join(verResult.RedFlags, "; "))
 			post.Status = "skipped"
-			post.SkipReason = fmt.Sprintf("SPAM / FAKE POST FLAGGED: %s", strings.Join(verResult.RedFlags, "; "))
+			post.SkipReason = fmt.Sprintf("SPAM / SCAM FLAGGED: %s", strings.Join(verResult.RedFlags, "; "))
 
 			if p.postStore != nil {
 				post, _ = p.postStore.SavePost(ctx, post)

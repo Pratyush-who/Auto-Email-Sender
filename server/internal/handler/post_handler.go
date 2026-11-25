@@ -18,14 +18,16 @@ import (
 type PostStore interface {
 	SavePost(ctx context.Context, p *model.Post) (*model.Post, error)
 	GetPosts(ctx context.Context, limit, offset int) ([]model.Post, error)
+	ClearAllPosts(ctx context.Context) error
 	CreateRun(ctx context.Context, run *model.Run) (*model.Run, error)
 	UpdateRun(ctx context.Context, runID, status string, finishedAt time.Time, stats map[string]any) error
 	GetRuns(ctx context.Context, limit int) ([]model.Run, error)
 }
 
-// ContactStore defines contact listing operations for the handler.
+// ContactStore defines contact operations for the handlers.
 type ContactStore interface {
 	GetContacts(ctx context.Context, limit int) ([]model.Contact, error)
+	SaveContact(ctx context.Context, c *model.Contact) (*model.Contact, error)
 }
 
 // PostPipeline defines extraction, filtering, and verification execution.
@@ -181,7 +183,7 @@ func (h *PostHandler) ListPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := 50
+	limit := 500
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
 			limit = parsed
@@ -206,6 +208,21 @@ func (h *PostHandler) ListPosts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, posts)
+}
+
+// ClearPosts handles DELETE /api/posts (clears all discovered post records).
+func (h *PostHandler) ClearPosts(w http.ResponseWriter, r *http.Request) {
+	if h.postStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "message": "no post store configured"})
+		return
+	}
+
+	if err := h.postStore.ClearAllPosts(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "message": "all discovered posts cleared successfully"})
 }
 
 // TriggerRun handles POST /api/runs (dispatches search to worker and saves extracted posts).
@@ -234,7 +251,7 @@ func (h *PostHandler) TriggerRun(w http.ResponseWriter, r *http.Request) {
 		input.SortBy = "relevance"
 	}
 	if input.MaxPosts <= 0 {
-		input.MaxPosts = 60
+		input.MaxPosts = 150
 	}
 
 	now := time.Now().UTC()

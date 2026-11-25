@@ -2,15 +2,17 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
-const MAX_RUNS_PER_DAY = 3
-const MAX_POSTS_PER_RUN = 60
+const DEFAULT_MAX_RUNS_PER_DAY = 3
+const DEFAULT_MAX_POSTS_PER_RUN = 60
 
 export class Guardrails {
-  constructor(storageDir = './data') {
+  constructor(storageDir = './data', options = {}) {
     this.storageDir = storageDir
     this.statsFile = path.join(storageDir, 'run_stats.json')
     this.isLocked = false
     this.activeRunId = null
+    this.maxRunsPerDay = options.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY
+    this.maxPostsPerRun = options.maxPostsPerRun ?? DEFAULT_MAX_POSTS_PER_RUN
     this.ensureStorage()
   }
 
@@ -62,10 +64,10 @@ export class Guardrails {
     }
 
     const todayCount = this.getTodayRunCount()
-    if (todayCount >= MAX_RUNS_PER_DAY) {
+    if (todayCount >= this.maxRunsPerDay) {
       return {
         allowed: false,
-        reason: `Daily quota reached (${todayCount}/${MAX_RUNS_PER_DAY} runs today). Reset occurs at midnight UTC.`,
+        reason: `Daily quota reached (${todayCount}/${this.maxRunsPerDay} runs today). Reset occurs at midnight UTC.`,
         code: 'DAILY_LIMIT_EXCEEDED',
       }
     }
@@ -83,8 +85,24 @@ export class Guardrails {
       allowed: true,
       runId,
       todayRuns: stats[today],
-      maxRunsToday: MAX_RUNS_PER_DAY,
+      maxRunsToday: this.maxRunsPerDay,
     }
+  }
+
+  refundRun() {
+    const stats = this.loadStats()
+    const today = this.getTodayKey()
+    if (stats[today] && stats[today] > 0) {
+      stats[today] -= 1
+      this.saveStats(stats)
+    }
+  }
+
+  resetTodayQuota() {
+    const stats = this.loadStats()
+    const today = this.getTodayKey()
+    stats[today] = 0
+    this.saveStats(stats)
   }
 
   releaseRunLock() {
@@ -95,9 +113,9 @@ export class Guardrails {
   clampMaxPosts(requested) {
     const n = Number.parseInt(requested, 10)
     if (Number.isNaN(n) || n <= 0) {
-      return MAX_POSTS_PER_RUN
+      return this.maxPostsPerRun
     }
-    return Math.min(n, MAX_POSTS_PER_RUN)
+    return Math.min(n, this.maxPostsPerRun)
   }
 
   detectCheckpointOrAuthWall(url = '', pageContent = '') {

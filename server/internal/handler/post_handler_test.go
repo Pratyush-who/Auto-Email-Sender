@@ -30,6 +30,11 @@ func (m *mockPostStore) GetPosts(ctx context.Context, limit, offset int) ([]mode
 	return m.posts, nil
 }
 
+func (m *mockPostStore) ClearAllPosts(ctx context.Context) error {
+	m.posts = nil
+	return nil
+}
+
 func (m *mockPostStore) CreateRun(ctx context.Context, run *model.Run) (*model.Run, error) {
 	run.ID = "run_test_123"
 	m.runs = append(m.runs, *run)

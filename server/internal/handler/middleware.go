@@ -32,6 +32,12 @@ func StructuredLoggerMiddleware(logger *slog.Logger) func(next http.Handler) htt
 					slog.String("request_id", middleware.GetReqID(r.Context())),
 				}
 
+				if r.URL.Path == "/api/orchestrator/status" || r.URL.Path == "/health" {
+					// Log routine polling at debug level to keep console logs clean
+					logger.LogAttrs(r.Context(), slog.LevelDebug, "polling completed", attrs...)
+					return
+				}
+
 				if status >= 500 {
 					logger.LogAttrs(r.Context(), slog.LevelError, "http request completed with error", attrs...)
 				} else if status >= 400 {

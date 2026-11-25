@@ -73,7 +73,7 @@ func SetupRouter(deps RouterDependencies) *chi.Mux {
 	settingsHandler := NewSettingsHandler(deps.SettingsStore)
 	profileHandler := NewProfileHandler(deps.ProfileStore, deps.Config.UploadDir)
 	postHandler := NewPostHandler(deps.PostStore, deps.ContactStore, deps.SettingsStore, deps.WorkerClient, deps.Pipeline)
-	outreachHandler := NewOutreachHandler(deps.OutreachStore, deps.ProfileStore, deps.PostStore, deps.Composer)
+	outreachHandler := NewOutreachHandler(deps.OutreachStore, deps.ProfileStore, deps.PostStore, deps.ContactStore, deps.Composer)
 	senderHandler := NewSenderHandler(deps.Sender)
 	orchestratorHandler := NewOrchestratorHandler(deps.Orchestrator, deps.ReplyStore, deps.Poller)
 
@@ -91,6 +91,7 @@ func SetupRouter(deps RouterDependencies) *chi.Mux {
 		// Posts & Scrape Runs
 		api.Post("/posts/manual", postHandler.ManualImportPost)
 		api.Get("/posts", postHandler.ListPosts)
+		api.Delete("/posts", postHandler.ClearPosts)
 		api.Post("/runs", postHandler.TriggerRun)
 		api.Get("/runs", postHandler.ListRuns)
 

@@ -240,7 +240,8 @@ func (r *OutreachRepository) HasSentToAddressOrCompanyWithinDays(ctx context.Con
 }
 
 // HasExistingInitialOutreach checks if an initial outreach already exists or was sent for this contact.
-func (r *OutreachRepository) HasExistingInitialOutreach(ctx context.Context, contactID string) (bool, error) {
+// If excludeID is provided, that specific outreach record is ignored so an outreach being sent doesn't match itself.
+func (r *OutreachRepository) HasExistingInitialOutreach(ctx context.Context, contactID string, excludeID ...string) (bool, error) {
 	if r.pool == nil {
 		return false, errors.New("database pool is not initialized")
 	}
@@ -251,10 +252,16 @@ func (r *OutreachRepository) HasExistingInitialOutreach(ctx context.Context, con
 			WHERE contact_id = $1::uuid
 			  AND kind = 'initial'
 			  AND status IN ('queued', 'sent', 'replied')
+			  AND ($2::text IS NULL OR $2 = '' OR id != $2::uuid)
 		)
 	`
+	var excl string
+	if len(excludeID) > 0 {
+		excl = excludeID[0]
+	}
+
 	var exists bool
-	err := r.pool.QueryRow(ctx, query, contactID).Scan(&exists)
+	err := r.pool.QueryRow(ctx, query, contactID, excl).Scan(&exists)
 	return exists, err
 }
 

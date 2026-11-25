@@ -70,7 +70,7 @@ func (m *mockOutreachStoreForHandler) HasSentToAddressOrCompanyWithinDays(ctx co
 	return false, nil
 }
 
-func (m *mockOutreachStoreForHandler) HasExistingInitialOutreach(ctx context.Context, contactID string) (bool, error) {
+func (m *mockOutreachStoreForHandler) HasExistingInitialOutreach(ctx context.Context, contactID string, excludeID ...string) (bool, error) {
 	return false, nil
 }
 
@@ -94,7 +94,7 @@ func TestOutreachHandler_ListAndApprove(t *testing.T) {
 		},
 	}
 
-	h := NewOutreachHandler(store, nil, nil, nil)
+	h := NewOutreachHandler(store, nil, nil, nil, nil)
 
 	// List
 	req := httptest.NewRequest(http.MethodGet, "/api/outreach", nil)
@@ -139,7 +139,7 @@ func TestOutreachHandler_UpdateDraft(t *testing.T) {
 		},
 	}
 
-	h := NewOutreachHandler(store, nil, nil, nil)
+	h := NewOutreachHandler(store, nil, nil, nil, nil)
 	r := chi.NewRouter()
 	r.Put("/api/outreach/{id}", h.UpdateOutreach)
 

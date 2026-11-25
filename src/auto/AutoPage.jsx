@@ -37,18 +37,20 @@ export default function AutoPage() {
   const [countdown, setCountdown] = useState(0)
 
   // Run panel state
-  const [query, setQuery] = useState('golang remote developer')
+  const [query, setQuery] = useState('')
   const [timeFilter, setTimeFilter] = useState('24h')
   const [sortBy, setSortBy] = useState('latest')
   const [isRunning, setIsRunning] = useState(false)
 
   // Data states
   const [posts, setPosts] = useState([])
+  const [contacts, setContacts] = useState([])
   const [outreachList, setOutreachList] = useState([])
   const [replies, setReplies] = useState([])
   const [runs, setRuns] = useState([])
   const [settings, setSettings] = useState(null)
   const [profile, setProfile] = useState(null)
+  const [authStatus, setAuthStatus] = useState({ connected: false, email: '' })
   const [toast, setToast] = useState('')
 
   // Multiselect state for Drafts
@@ -56,6 +58,8 @@ export default function AutoPage() {
   const [editingDraftId, setEditingDraftId] = useState(null)
   const [draftEditValues, setDraftEditValues] = useState({ subject: '', body: '' })
   const [renderTimestamp, setRenderTimestamp] = useState(() => Date.now())
+  const [selectedRun, setSelectedRun] = useState(null)
+  const [actionLoadingId, setActionLoadingId] = useState(null)
 
   const showToast = (msg) => {
     setToast(msg)
@@ -64,14 +68,16 @@ export default function AutoPage() {
 
   const loadAllData = useCallback(async () => {
     try {
-      const [sumData, postData, outData, repData, runData, setts, prof] = await Promise.all([
+      const [sumData, postData, contactData, outData, repData, runData, setts, prof, authData] = await Promise.all([
         api.getDashboardSummary(),
         api.getPosts(),
+        api.getContacts(),
         api.getOutreach(),
         api.getReplies(),
         api.getRuns(),
         api.getSettings(),
         api.getProfile(),
+        api.getAuthStatus(),
       ])
 
       if (sumData) {
@@ -88,30 +94,52 @@ export default function AutoPage() {
       }
 
       setPosts(postData || [])
+      setContacts(contactData || [])
       setOutreachList(outData || [])
       setReplies(repData || [])
       setRuns(runData || [])
       setSettings(setts)
       setProfile(prof)
+      if (authData) setAuthStatus(authData)
     } catch (err) {
       console.warn('Error loading dashboard data:', err)
     }
   }, [])
 
+  // Check URL params for OAuth redirect callback
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('auth') === 'success') {
+      const email = params.get('email')
+      showToast(`✓ Google Account connected successfully${email ? ' as ' + email : ''}!`)
+      window.history.replaceState({}, document.title, window.location.pathname)
+    } else if (params.get('error')) {
+      showToast(`Google sign-in error: ${params.get('error')}`)
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+  }, [])
+
   // Initial load + periodic poller for orchestrator status (every 10s)
   useEffect(() => {
+    // Clear legacy mock state from localStorage
+    try {
+      localStorage.removeItem('emailauto.mock_state.v1')
+    } catch {}
+
     let ignore = false
 
     async function fetchInitialData() {
       try {
-        const [sumData, postData, outData, repData, runData, setts, prof] = await Promise.all([
+        const [sumData, postData, contactData, outData, repData, runData, setts, prof, authData] = await Promise.all([
           api.getDashboardSummary(),
           api.getPosts(),
+          api.getContacts(),
           api.getOutreach(),
           api.getReplies(),
           api.getRuns(),
           api.getSettings(),
           api.getProfile(),
+          api.getAuthStatus(),
         ])
 
         if (!ignore) {
@@ -129,11 +157,13 @@ export default function AutoPage() {
           }
 
           setPosts(postData || [])
+          setContacts(contactData || [])
           setOutreachList(outData || [])
           setReplies(repData || [])
           setRuns(runData || [])
           setSettings(setts)
           setProfile(prof)
+          if (authData) setAuthStatus(authData)
         }
       } catch (err) {
         console.warn('Error loading dashboard data:', err)
@@ -200,25 +230,55 @@ export default function AutoPage() {
     showToast('🚨 EMERGENCY KILL SWITCH ACTIVATED: Engine paused and disarmed.')
   }
 
+  // Cancel Running Scrape
+  const handleCancelRun = async () => {
+    try {
+      showToast('⏹ Cancelling active scrape and halting engine...')
+      await api.cancelRun()
+      setIsRunning(false)
+      setSummary((prev) => ({
+        ...prev,
+        state: 'IDLE',
+      }))
+      await loadAllData()
+      showToast('🛑 Active scrape cancelled.')
+    } catch (err) {
+      setIsRunning(false)
+      showToast(`Cancel error: ${err.message}`)
+    }
+  }
+
   // Trigger Manual Run (Arms the engine for today)
   const handleTriggerRun = async () => {
+    const trimmedQuery = query.trim()
+    if (!trimmedQuery) {
+      showToast('⚠️ Please enter a search query (e.g. hiring flutter, golang developer, react full stack)')
+      return
+    }
     setIsRunning(true)
     try {
-      await api.triggerRun({ query, timeFilter, sortBy })
-      setRenderTimestamp(Date.now())
       setSummary((prev) => ({
         ...prev,
         state: 'RUNNING',
-        armed: true,
       }))
-      showToast(`Manual run started for "${query}" — Engine is now ARMED for today!`)
-      setTimeout(async () => {
-        setIsRunning(false)
-        await loadAllData()
-      }, 2000)
+      const res = await api.triggerRun({ query: trimmedQuery, timeFilter, sortBy })
+      setRenderTimestamp(Date.now())
+
+      if (res?.error || (res?.run && res.run.status === 'failed')) {
+        const issue = res.run?.stats?.issue || res.run?.stats?.error || res.error || res.message || 'Scrape execution failed'
+        showToast(`⚠️ Run Notice: ${issue}`)
+        if (res.run) setSelectedRun(res.run)
+      } else {
+        const stats = res?.run?.stats || {}
+        showToast(`✓ Run completed for "${trimmedQuery}" — Found: ${stats.found ?? 0}, Drafted: ${stats.drafted ?? 0}`)
+        if (res.run) setSelectedRun(res.run)
+      }
+
+      await loadAllData()
     } catch (err) {
-      setIsRunning(false)
       showToast(`Run error: ${err.message}`)
+    } finally {
+      setIsRunning(false)
     }
   }
 
@@ -233,6 +293,58 @@ export default function AutoPage() {
       )
     } catch (err) {
       showToast(`Poll error: ${err.message}`)
+    }
+  }
+
+  // Launch persistent Chrome for LinkedIn login
+  const handleOpenLoginBrowser = async () => {
+    showToast('Launching Chrome browser for LinkedIn login...')
+    const res = await api.openLinkedInLogin()
+    if (res?.message) {
+      showToast(res.message)
+    }
+  }
+
+  // On-demand draft generation from a found post
+  const handleCreateDraftForPost = async (post) => {
+    setActionLoadingId('draft_' + post.id)
+    try {
+      showToast(`Generating cold email draft for ${post.company || post.role}...`)
+      const matchingContact = contacts.find(
+        (c) => c.post_id === post.id || (post.extracted?.emails && post.extracted.emails.includes(c.email))
+      )
+      const contactId = matchingContact?.id || ''
+      const res = await api.generateDraft({ postId: post.id, contactId })
+      await loadAllData()
+      setActiveTab('drafts')
+      if (res?.subject) {
+        showToast(`✓ Cold email drafted: "${res.subject}"! Switched to Drafts & Approvals.`)
+      } else {
+        showToast(`✓ Cold email draft generated! Switched to Drafts & Approvals.`)
+      }
+    } catch (err) {
+      showToast(`Draft generation failed: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  // Clear all discovered opportunities
+  const handleClearAllPosts = async () => {
+    if (!window.confirm(`Are you sure you want to clear all ${posts.length} discovered opportunities?`)) {
+      return
+    }
+    setActionLoadingId('clear_posts')
+    try {
+      showToast('Clearing all discovered opportunities...')
+      await api.clearAllPosts()
+      setPosts([])
+      await loadAllData()
+      showToast('✓ All discovered opportunities cleared!')
+    } catch (err) {
+      showToast(`Error clearing posts: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
     }
   }
 
@@ -254,20 +366,40 @@ export default function AutoPage() {
   const handleBulkApprove = async () => {
     if (selectedDraftIds.length === 0) return
     const count = selectedDraftIds.length
-    await api.bulkApproveOutreach(selectedDraftIds)
-    setSelectedDraftIds([])
-    await loadAllData()
-    showToast(`Approved ${count} outreach drafts into queue`)
+    setActionLoadingId('bulk_approve')
+    try {
+      await api.bulkApproveOutreach(selectedDraftIds)
+      setSelectedDraftIds([])
+      await loadAllData()
+      showToast(`Approved ${count} outreach drafts into queue`)
+    } catch (err) {
+      showToast(`Bulk approve error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
   }
 
   const handleBulkSendNow = async () => {
     if (selectedDraftIds.length === 0) return
     const count = selectedDraftIds.length
+    setActionLoadingId('bulk_send')
     showToast(`Sending ${count} selected emails now via Gmail...`)
-    await api.bulkSendOutreach(selectedDraftIds)
-    setSelectedDraftIds([])
-    await loadAllData()
-    showToast(`Successfully dispatched ${count} selected emails`)
+    try {
+      const res = await api.bulkSendOutreach(selectedDraftIds)
+      setSelectedDraftIds([])
+      await loadAllData()
+      if (res?.sent) {
+        showToast(`✓ Successfully dispatched ${count} selected emails!`)
+      } else if (res?.reason) {
+        showToast(`⚠️ Send notice: ${res.reason}`)
+      } else {
+        showToast(`Dispatched ${count} selected emails`)
+      }
+    } catch (err) {
+      showToast(`Bulk send error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
   }
 
   const handleBulkSkip = async () => {
@@ -280,16 +412,57 @@ export default function AutoPage() {
   }
 
   const handleApproveSingle = async (id) => {
-    await api.approveOutreach(id)
-    await loadAllData()
-    showToast('Outreach approved and placed in queue')
+    setActionLoadingId('approve_' + id)
+    try {
+      await api.approveOutreach(id)
+      await loadAllData()
+      showToast('Outreach approved and placed in queue')
+    } catch (err) {
+      showToast(`Approve error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
   }
 
   const handleSendSingleNow = async (id) => {
+    setActionLoadingId('send_' + id)
     showToast('Dispatching email via Gmail...')
-    await api.sendOutreachNow(id)
-    await loadAllData()
-    showToast('Email sent successfully!')
+    try {
+      const res = await api.sendOutreachNow(id)
+      await loadAllData()
+      if (res?.sent) {
+        showToast('✓ Email sent successfully via Gmail!')
+      } else if (res?.reason) {
+        showToast(`⚠️ Send notice: ${res.reason}`)
+      } else {
+        showToast('Dispatch request completed')
+      }
+    } catch (err) {
+      showToast(`Send error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  const handleRemoveResume = async () => {
+    try {
+      const updated = { ...profile, resume_path: '', resume_text: '' }
+      const res = await api.saveProfile(updated)
+      setProfile(res || updated)
+      showToast('✓ Resume removed. Future emails will not attach a PDF (live link dub.sh/pratyush is used).')
+    } catch (err) {
+      showToast(`Failed to remove resume: ${err.message}`)
+    }
+  }
+
+  const handleDisconnectGoogle = async () => {
+    try {
+      await api.disconnectGoogle()
+      setAuthStatus({ connected: false, email: '' })
+      showToast('Google account disconnected')
+    } catch (err) {
+      showToast(`Disconnect failed: ${err.message}`)
+    }
   }
 
   const handleSkipSingle = async (id) => {
@@ -350,7 +523,7 @@ export default function AutoPage() {
       {/* ASCII Banner & Header */}
       <header className="app-header">
         <pre className="ascii-banner">{ASCII_LOGO}</pre>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.8rem' }}>
+        <div className="app-header-row">
           <div>
             <h1>Autonomous Job Hunter</h1>
             <p className="muted">
@@ -438,7 +611,7 @@ export default function AutoPage() {
 
       {/* Run Panel */}
       <section className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
           <h2 style={{ margin: 0 }}>Manual Scrape & Pipeline Trigger</h2>
           <span className="muted" style={{ fontSize: '0.82rem' }}>
             {summary.armed ? '✓ Engine is currently ARMED for today' : '⚠️ Clicking "Run Now" arms the engine for today'}
@@ -450,7 +623,7 @@ export default function AutoPage() {
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="e.g. golang remote, founding react engineer"
+              placeholder="e.g. hiring flutter, golang developer, full stack"
             />
           </label>
           <label>
@@ -468,17 +641,70 @@ export default function AutoPage() {
               <option value="relevance">Relevance</option>
             </select>
           </label>
-          <button
-            type="button"
-            className="btn"
-            onClick={handleTriggerRun}
-            disabled={isRunning}
-            style={{ height: '42px' }}
-          >
-            {isRunning ? 'Running...' : 'Run Now & Arm'}
-          </button>
+          <div className="run-panel-buttons">
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={handleOpenLoginBrowser}
+              title="Open persistent Chrome window to log into LinkedIn"
+              style={{ fontSize: '0.82rem', padding: '0 0.7rem', whiteSpace: 'nowrap' }}
+            >
+              🔑 LinkedIn Login
+            </button>
+            {isRunning ? (
+              <button
+                type="button"
+                className="btn btn-kill"
+                onClick={handleCancelRun}
+                title="Immediately stop the active scrape"
+                style={{ padding: '0 1rem', whiteSpace: 'nowrap' }}
+              >
+                ⏹ Cancel Scrape
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn"
+                onClick={handleTriggerRun}
+                disabled={!query.trim()}
+                title={!query.trim() ? "Please enter a search query (e.g. hiring flutter)" : "Arm engine and start search pipeline"}
+                style={{
+                  padding: '0 1rem',
+                  whiteSpace: 'nowrap',
+                  opacity: !query.trim() ? 0.6 : 1,
+                  cursor: !query.trim() ? 'not-allowed' : 'pointer'
+                }}
+              >
+                Run Now & Arm
+              </button>
+            )}
+          </div>
         </div>
       </section>
+
+      {/* Active Scraping & Pipeline Indicator Banner */}
+      {(isRunning || summary.state === 'RUNNING' || summary.state === 'SEARCHING') && (
+        <section className="active-run-banner">
+          <div className="active-run-spinner" />
+          <div style={{ flex: 1 }}>
+            <h3 style={{ margin: 0, color: '#93c5fd', fontSize: '1.02rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              ⚡ Scraper & Pipeline Active: Querying "{query}"
+            </h3>
+            <p className="muted" style={{ margin: '0.25rem 0 0 0', fontSize: '0.84rem' }}>
+              Playwright Chrome is actively scraping LinkedIn for latest opportunities, verifying domains, and generating drafts...
+            </p>
+          </div>
+          <button
+            type="button"
+            className="btn btn-kill"
+            onClick={handleCancelRun}
+            title="Immediately stop the active LinkedIn scrape and close browser"
+            style={{ padding: '0.45rem 0.9rem', fontSize: '0.85rem' }}
+          >
+            ⏹ Cancel & Stop Scrape
+          </button>
+        </section>
+      )}
 
       {/* Tab Navigation */}
       <nav className="tabs-nav">
@@ -536,7 +762,21 @@ export default function AutoPage() {
       {/* Tab Content 1: Found Posts */}
       {activeTab === 'posts' && (
         <section className="card">
-          <h2>Discovered Opportunities ({posts.length})</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+            <h2 style={{ margin: 0 }}>Discovered Opportunities ({posts.length})</h2>
+            {posts.length > 0 && (
+              <button
+                type="button"
+                className="btn btn-kill"
+                onClick={handleClearAllPosts}
+                disabled={actionLoadingId === 'clear_posts'}
+                title="Delete all discovered opportunities from the database"
+                style={{ padding: '0.35rem 0.85rem', fontSize: '0.82rem', whiteSpace: 'nowrap' }}
+              >
+                {actionLoadingId === 'clear_posts' ? '⏳ Clearing...' : `🗑 Clear All (${posts.length})`}
+              </button>
+            )}
+          </div>
           {posts.length === 0 ? (
             <p className="muted">No posts discovered yet. Trigger a run above or enable Autopilot.</p>
           ) : (
@@ -581,6 +821,82 @@ export default function AutoPage() {
                     View LinkedIn Post ↗
                   </a>
                 </div>
+
+                {post.extracted?.emails && post.extracted.emails.length > 0 && (
+                  <div style={{ marginTop: '0.6rem', display: 'flex', gap: '0.8rem', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', borderTop: '1px solid #1f1f23', paddingTop: '0.6rem' }}>
+                    <span style={{ fontSize: '0.82rem', color: '#93c5fd' }}>
+                      ✉ Recipient Email: <strong>{post.extracted.emails[0]}</strong>
+                    </span>
+                    {(() => {
+                      const existingDraft = outreachList.find((o) => o.post_id === post.id)
+                      if (existingDraft) {
+                        return (
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{
+                              fontSize: '0.78rem',
+                              padding: '0.25rem 0.7rem',
+                              color: '#86efac',
+                              borderColor: '#22c55e',
+                              background: 'rgba(34, 197, 94, 0.12)',
+                              cursor: 'pointer',
+                              fontWeight: 600,
+                            }}
+                            onClick={() => setActiveTab('drafts')}
+                            title="Draft created! Click to view in Drafts & Approvals"
+                          >
+                            ✓ Draft Ready (in Approvals) ↗
+                          </button>
+                        )
+                      }
+                      return (
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ fontSize: '0.78rem', padding: '0.25rem 0.65rem' }}
+                          onClick={() => handleCreateDraftForPost(post)}
+                          disabled={Boolean(actionLoadingId)}
+                          title="Generate a personalized cold email draft tailored to this company"
+                        >
+                          {actionLoadingId === 'draft_' + post.id ? '⏳ Drafting with AI...' : '✉ Draft Cold Email'}
+                        </button>
+                      )
+                    })()}
+                  </div>
+                )}
+
+                {post.extracted?.phones && post.extracted.phones.length > 0 && (
+                  <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', borderTop: !post.extracted?.emails || post.extracted.emails.length === 0 ? '1px solid #1f1f23' : 'none', paddingTop: !post.extracted?.emails || post.extracted.emails.length === 0 ? '0.6rem' : '0' }}>
+                    <span style={{ fontSize: '0.82rem', color: '#86efac' }}>📞 Contact Phone:</span>
+                    {post.extracted.phones.map((phone, pIdx) => {
+                      const cleanDigits = phone.replace(/\D/g, '')
+                      const waNum = cleanDigits.length === 10 ? `91${cleanDigits}` : cleanDigits
+                      return (
+                        <div key={pIdx} style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center' }}>
+                          <a
+                            href={`tel:${phone}`}
+                            className="tag tag-remote"
+                            style={{ textDecoration: 'none', color: '#93c5fd' }}
+                            title="Call phone number"
+                          >
+                            📞 {phone}
+                          </a>
+                          <a
+                            href={`https://wa.me/${waNum}?text=${encodeURIComponent(`Hi, I saw your post on LinkedIn regarding ${post.role || 'the open position'} at ${post.company || 'your company'}.`)}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="tag tag-paid"
+                            style={{ textDecoration: 'none', background: '#059669', color: '#fff', fontSize: '0.75rem', padding: '0.15rem 0.5rem' }}
+                            title="Chat on WhatsApp"
+                          >
+                            💬 WhatsApp
+                          </a>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             ))
           )}
@@ -590,6 +906,43 @@ export default function AutoPage() {
       {/* Tab Content 2: Drafts & Approvals (With Multiselect) */}
       {activeTab === 'drafts' && (
         <section className="card">
+          {!authStatus.connected && (
+            <div style={{
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.45)',
+              borderRadius: '8px',
+              padding: '0.85rem 1.1rem',
+              marginBottom: '1.2rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '1rem',
+              flexWrap: 'wrap'
+            }}>
+              <div>
+                <span style={{ fontWeight: 700, color: '#f87171' }}>⚠️ Gmail Not Connected:</span>
+                <span style={{ color: '#fca5a5', marginLeft: '0.5rem', fontSize: '0.88rem' }}>
+                  To dispatch cold emails directly to recruiter inboxes, connect your Google account.
+                </span>
+              </div>
+              <a
+                href="http://localhost:8080/auth/google"
+                className="btn"
+                style={{
+                  background: '#ef4444',
+                  color: '#fff',
+                  textDecoration: 'none',
+                  padding: '0.35rem 0.85rem',
+                  fontSize: '0.82rem',
+                  fontWeight: 600,
+                  borderRadius: '4px'
+                }}
+              >
+                Connect Gmail Account ↗
+              </a>
+            </div>
+          )}
+
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem' }}>
             <div>
               <h2 style={{ margin: 0 }}>Review & Dispatch Drafts ({drafts.length})</h2>
@@ -617,13 +970,28 @@ export default function AutoPage() {
                 ✓ {selectedDraftIds.length} draft{selectedDraftIds.length > 1 ? 's' : ''} selected
               </span>
               <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-                <button type="button" className="btn" onClick={handleBulkApprove}>
-                  ✓ Approve Selected ({selectedDraftIds.length})
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={handleBulkApprove}
+                  disabled={Boolean(actionLoadingId)}
+                >
+                  {actionLoadingId === 'bulk_approve' ? '⏳ Approving...' : `✓ Approve Selected (${selectedDraftIds.length})`}
                 </button>
-                <button type="button" className="btn-send-now" onClick={handleBulkSendNow}>
-                  ✈ Send Selected Now ({selectedDraftIds.length})
+                <button
+                  type="button"
+                  className="btn-send-now"
+                  onClick={handleBulkSendNow}
+                  disabled={Boolean(actionLoadingId)}
+                >
+                  {actionLoadingId === 'bulk_send' ? '⏳ Sending...' : `✈ Send Selected Now (${selectedDraftIds.length})`}
                 </button>
-                <button type="button" className="btn btn-ghost" onClick={handleBulkSkip}>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={handleBulkSkip}
+                  disabled={Boolean(actionLoadingId)}
+                >
                   ✕ Skip Selected
                 </button>
                 <button
@@ -676,20 +1044,38 @@ export default function AutoPage() {
                     </div>
 
                     <div className="row" style={{ gap: '0.4rem' }}>
-                      <button type="button" className="btn" onClick={() => handleApproveSingle(d.id)} title="Add to automated schedule queue">
-                        ✓ Approve
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={() => handleApproveSingle(d.id)}
+                        disabled={Boolean(actionLoadingId)}
+                        title="Add to automated schedule queue"
+                      >
+                        {actionLoadingId === 'approve_' + d.id ? '⏳ Approving...' : '✓ Approve'}
                       </button>
-                      <button type="button" className="btn-send-now" onClick={() => handleSendSingleNow(d.id)} title="Send email immediately via Gmail">
-                        ✈ Send Now
+                      <button
+                        type="button"
+                        className="btn-send-now"
+                        onClick={() => handleSendSingleNow(d.id)}
+                        disabled={Boolean(actionLoadingId)}
+                        title="Send email immediately via Gmail"
+                      >
+                        {actionLoadingId === 'send_' + d.id ? '⏳ Sending...' : '✈ Send Now'}
                       </button>
                       <button
                         type="button"
                         className="btn btn-ghost"
                         onClick={() => (isEditing ? handleSaveEditDraft(d.id) : handleStartEditDraft(d))}
+                        disabled={Boolean(actionLoadingId)}
                       >
                         {isEditing ? 'Save' : '✎ Edit'}
                       </button>
-                      <button type="button" className="btn btn-ghost" onClick={() => handleSkipSingle(d.id)}>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => handleSkipSingle(d.id)}
+                        disabled={Boolean(actionLoadingId)}
+                      >
                         ✕ Skip
                       </button>
                     </div>
@@ -727,6 +1113,43 @@ export default function AutoPage() {
       {/* Tab Content 3: Queue */}
       {activeTab === 'queue' && (
         <section className="card">
+          {!authStatus.connected && (
+            <div style={{
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.45)',
+              borderRadius: '8px',
+              padding: '0.85rem 1.1rem',
+              marginBottom: '1.2rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '1rem',
+              flexWrap: 'wrap'
+            }}>
+              <div>
+                <span style={{ fontWeight: 700, color: '#f87171' }}>⚠️ Gmail Not Connected:</span>
+                <span style={{ color: '#fca5a5', marginLeft: '0.5rem', fontSize: '0.88rem' }}>
+                  Emails waiting in queue will not send until your Google account is connected.
+                </span>
+              </div>
+              <a
+                href="http://localhost:8080/auth/google"
+                className="btn"
+                style={{
+                  background: '#ef4444',
+                  color: '#fff',
+                  textDecoration: 'none',
+                  padding: '0.35rem 0.85rem',
+                  fontSize: '0.82rem',
+                  fontWeight: 600,
+                  borderRadius: '4px'
+                }}
+              >
+                Connect Gmail Account ↗
+              </a>
+            </div>
+          )}
+
           <h2>Outreach Queue ({queue.length})</h2>
           <p className="muted">Approved emails scheduled to send within your daily window respecting time gaps.</p>
           {queue.length === 0 ? (
@@ -742,11 +1165,22 @@ export default function AutoPage() {
                     </p>
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                    <span className="tag tag-remote">
-                      Scheduled: {q.scheduled_at ? new Date(q.scheduled_at).toLocaleTimeString() : 'Pending gap'}
-                    </span>
-                    <button type="button" className="btn-send-now" onClick={() => handleSendSingleNow(q.id)}>
-                      ✈ Send Now
+                    {q.scheduled_at ? (
+                      <span className="tag tag-remote" title={`Scheduled for ${new Date(q.scheduled_at).toLocaleString()}`}>
+                        ⏰ Scheduled: {new Date(q.scheduled_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                        {new Date(q.scheduled_at).getTime() <= Date.now() ? ' (Due Now)' : ` (in ${Math.max(1, Math.round((new Date(q.scheduled_at).getTime() - Date.now()) / 60000))}m)`}
+                      </span>
+                    ) : (
+                      <span className="tag tag-remote">⏳ Pending dispatch gap</span>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-send-now"
+                      onClick={() => handleSendSingleNow(q.id)}
+                      disabled={Boolean(actionLoadingId)}
+                      title="Send email immediately via Gmail"
+                    >
+                      {actionLoadingId === 'send_' + q.id ? '⏳ Sending...' : '✈ Send Now'}
                     </button>
                   </div>
                 </div>
@@ -791,7 +1225,7 @@ export default function AutoPage() {
         <div style={{ display: 'grid', gap: '1.2rem' }}>
           {/* Section A: Inbound Replies */}
           <section className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.6rem', flexWrap: 'wrap', gap: '0.6rem' }}>
               <div>
                 <h2 style={{ margin: 0 }}>Inbound Replies ({replies.length})</h2>
                 <p className="muted" style={{ margin: '0.2rem 0 0 0', fontSize: '0.88rem' }}>
@@ -870,12 +1304,19 @@ export default function AutoPage() {
       {/* Tab Content 6: Run History */}
       {activeTab === 'history' && (
         <section className="card">
-          <h2>Pipeline Run Logs ({runs.length})</h2>
-          <p className="muted">History of manual triggers and autonomous scheduled scans.</p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem' }}>
+            <div>
+              <h2 style={{ margin: 0 }}>Pipeline Run Logs ({runs.length})</h2>
+              <p className="muted" style={{ margin: '0.2rem 0 0 0', fontSize: '0.88rem' }}>
+                Click on any run row below to view detailed execution logs, error diagnostics, and resolution steps.
+              </p>
+            </div>
+          </div>
+
           {runs.length === 0 ? (
-            <p className="muted">No execution runs recorded yet.</p>
+            <p className="muted" style={{ marginTop: '1rem' }}>No execution runs recorded yet.</p>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
+            <div className="runs-table-wrap">
               <table className="runs-table">
                 <thead>
                   <tr>
@@ -885,14 +1326,24 @@ export default function AutoPage() {
                     <th>Window</th>
                     <th>Status</th>
                     <th>Pipeline Metrics</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
                   {runs.map((r) => {
                     const stats = r.stats || {}
                     const runDate = r.created_at || r.started_at
+                    const isSelected = selectedRun?.id === r.id
+                    const isFailed = r.status === 'failed'
+                    const issueText = stats.issue || stats.error
+
                     return (
-                      <tr key={r.id}>
+                      <tr
+                        key={r.id}
+                        className={`run-row-clickable ${isSelected ? 'run-row-selected' : ''}`}
+                        onClick={() => setSelectedRun(isSelected ? null : r)}
+                        title="Click to view run logs & diagnostics"
+                      >
                         <td>{runDate ? new Date(runDate).toLocaleString() : 'N/A'}</td>
                         <td>
                           <span className={`pill ${r.trigger === 'auto' ? 'pill-armed' : 'pill-idle'}`} style={{ fontSize: '0.7rem' }}>
@@ -902,9 +1353,14 @@ export default function AutoPage() {
                         <td><code>{r.query || 'Default'}</code></td>
                         <td>{r.time_filter || '24h'} / {r.sort_by || 'latest'}</td>
                         <td>
-                          <span className={`tag ${r.status === 'completed' ? 'tag-paid' : 'tag-unpaid'}`}>
+                          <span className={`tag ${isFailed ? 'tag-unpaid' : 'tag-paid'}`}>
                             {(r.status || 'completed').toUpperCase()}
                           </span>
+                          {isFailed && issueText ? (
+                            <div style={{ color: '#fca5a5', fontSize: '0.72rem', marginTop: '0.2rem', maxWidth: '200px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {issueText}
+                            </div>
+                          ) : null}
                         </td>
                         <td>
                           <span className="stat-pill stat-found">Found: {stats.found ?? 0}</span>
@@ -913,11 +1369,137 @@ export default function AutoPage() {
                           <span className="stat-pill stat-skipped">Skipped: {stats.skipped ?? 0}</span>
                           <span className="stat-pill stat-drafted">Drafted: {stats.drafted ?? 0}</span>
                         </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            style={{ fontSize: '0.75rem', padding: '0.2rem 0.5rem' }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setSelectedRun(isSelected ? null : r)
+                            }}
+                          >
+                            {isSelected ? '▲ Hide Logs' : '▼ View Logs'}
+                          </button>
+                        </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* Detailed Selected Run Inspector */}
+          {selectedRun && (
+            <div className="run-details-card">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem', borderBottom: '1px solid #27272a', paddingBottom: '0.6rem', flexWrap: 'wrap', gap: '0.8rem' }}>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '1rem', wordBreak: 'break-all' }}>
+                    Run Diagnostics: <code>{selectedRun.id}</code>
+                  </h3>
+                  <p className="muted" style={{ margin: '0.2rem 0 0 0', fontSize: '0.8rem', wordBreak: 'break-word' }}>
+                    Trigger: <strong>{(selectedRun.trigger || 'manual').toUpperCase()}</strong> • Search Query: <code>"{selectedRun.query}"</code> • Filter: <strong>{selectedRun.time_filter || '24h'}</strong> / <strong>{selectedRun.sort_by || 'latest'}</strong>
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: '0.8rem' }}
+                  onClick={() => setSelectedRun(null)}
+                >
+                  ✕ Close Inspector
+                </button>
+              </div>
+
+              {/* Error & Resolution Alert if Failed */}
+              {selectedRun.status === 'failed' && (
+                <div style={{ background: '#1c1917', borderLeft: '4px solid #ef4444', padding: '0.8rem 1rem', borderRadius: '6px', marginBottom: '1rem' }}>
+                  <h4 style={{ margin: '0 0 0.3rem 0', color: '#f87171', fontSize: '0.92rem' }}>
+                    🚨 Run Execution Issue
+                  </h4>
+                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.88rem', color: '#fecaca', fontWeight: 600 }}>
+                    {selectedRun.stats?.issue || selectedRun.stats?.error || 'Scrape execution failed without error text'}
+                  </p>
+
+                  {/* Specific Actionable Guidance for Playwright Worker Down */}
+                  {(selectedRun.stats?.issue?.includes('playwright worker') ||
+                    selectedRun.stats?.error?.includes('playwright worker') ||
+                    selectedRun.stats?.error?.includes('connectex') ||
+                    selectedRun.stats?.error?.includes('refused it')) && (
+                    <div style={{ background: '#27272a', padding: '0.8rem 1rem', borderRadius: '6px', marginTop: '0.6rem', border: '1px solid #3f3f46' }}>
+                      <p style={{ margin: '0 0 0.4rem 0', fontWeight: 700, color: '#fbbf24', fontSize: '0.85rem' }}>
+                        ⚙️ How to fix: Start the Playwright Worker
+                      </p>
+                      <p style={{ margin: '0 0 0.4rem 0', fontSize: '0.83rem', color: '#e4e4e7' }}>
+                        The backend Go server is running, but the Node.js Playwright worker service on port 3001 is not running.
+                      </p>
+                      <ol style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.83rem', color: '#e4e4e7', lineHeight: '1.6' }}>
+                        <li>Open a terminal in the project directory.</li>
+                        <li>Run: <code style={{ color: '#38bdf8' }}>cd worker; npm start</code></li>
+                        <li>Once you see <code style={{ color: '#86efac' }}>[EmailAuto Worker] Running on http://localhost:3001</code>, click <strong>"Run Now & Arm"</strong>.</li>
+                      </ol>
+                    </div>
+                  )}
+
+                  {/* Specific Actionable Guidance for LinkedIn Login Wall */}
+                  {(selectedRun.stats?.issue?.includes('Login Required') ||
+                    selectedRun.stats?.error?.includes('login') ||
+                    selectedRun.stats?.error?.includes('CAPTCHA') ||
+                    selectedRun.stats?.error?.includes('uas/login')) && (
+                    <div style={{ background: '#27272a', padding: '0.8rem 1rem', borderRadius: '6px', marginTop: '0.6rem', border: '1px solid #3f3f46' }}>
+                      <p style={{ margin: '0 0 0.4rem 0', fontWeight: 700, color: '#fbbf24', fontSize: '0.85rem' }}>
+                        🔑 How to fix this in 10 seconds:
+                      </p>
+                      <ol style={{ margin: 0, paddingLeft: '1.2rem', fontSize: '0.83rem', color: '#e4e4e7', lineHeight: '1.5' }}>
+                        <li>The Playwright worker launched a headed Chrome browser window on your desktop.</li>
+                        <li>In that Chrome window, open <strong style={{ color: '#60a5fa' }}>linkedin.com</strong> and log into your LinkedIn account.</li>
+                        <li>Complete 2FA verification if LinkedIn prompts for it.</li>
+                        <li>Once you see your LinkedIn feed in that Chrome window, return to this dashboard and click <strong style={{ color: '#34d399' }}>"Run Now & Arm"</strong>.</li>
+                        <li>Your session cookies will be permanently preserved in <code>worker/user_data/</code> so you will not have to log in again.</li>
+                      </ol>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={handleOpenLoginBrowser}
+                        style={{ marginTop: '0.8rem', fontSize: '0.85rem' }}
+                      >
+                        🔑 Open LinkedIn in Chrome to Log In
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Stats Breakdown Grid */}
+              <div className="grid-2" style={{ gap: '0.6rem', marginBottom: '0.8rem' }}>
+                <div style={{ background: '#141417', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid #1f1f23' }}>
+                  <span className="muted" style={{ fontSize: '0.78rem' }}>Posts Discovered:</span>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#93c5fd' }}>{selectedRun.stats?.found ?? 0}</div>
+                </div>
+                <div style={{ background: '#141417', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid #1f1f23' }}>
+                  <span className="muted" style={{ fontSize: '0.78rem' }}>Passed Filters:</span>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#86efac' }}>{selectedRun.stats?.filtered ?? 0}</div>
+                </div>
+                <div style={{ background: '#141417', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid #1f1f23' }}>
+                  <span className="muted" style={{ fontSize: '0.78rem' }}>Domain Verified:</span>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#a7f3d0' }}>{selectedRun.stats?.verified ?? 0}</div>
+                </div>
+                <div style={{ background: '#141417', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid #1f1f23' }}>
+                  <span className="muted" style={{ fontSize: '0.78rem' }}>Drafts Generated:</span>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#c7d2fe' }}>{selectedRun.stats?.drafted ?? 0}</div>
+                </div>
+              </div>
+
+              {/* Raw JSON Debugging */}
+              <details style={{ marginTop: '0.5rem' }}>
+                <summary style={{ cursor: 'pointer', color: '#60a5fa', fontSize: '0.8rem' }}>
+                  🔍 Show Raw Run Metadata & Logs (JSON)
+                </summary>
+                <pre className="json-debug-pre">
+                  {JSON.stringify(selectedRun, null, 2)}
+                </pre>
+              </details>
             </div>
           )}
         </section>
@@ -926,6 +1508,52 @@ export default function AutoPage() {
       {/* Tab Content 7: Settings & Profile */}
       {activeTab === 'settings' && settings && profile && (
         <form onSubmit={handleSaveSettings} style={{ display: 'grid', gap: '1.2rem' }}>
+          {/* Google Account Connection Card */}
+          <section className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Google Account & Gmail Dispatch</h2>
+                <p className="muted" style={{ margin: '0.3rem 0 0 0', fontSize: '0.88rem' }}>
+                  Required to send emails from your personal/work Gmail account and monitor replies.
+                </p>
+              </div>
+              <div>
+                {authStatus.connected ? (
+                  <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+                    <span className="tag tag-paid" style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}>
+                      ✓ Connected: {authStatus.email || 'Authorized'}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={handleDisconnectGoogle}
+                      style={{ fontSize: '0.82rem', padding: '0.35rem 0.75rem', borderColor: '#ef4444', color: '#f87171' }}
+                    >
+                      Disconnect
+                    </button>
+                  </div>
+                ) : (
+                  <a
+                    href="http://localhost:8080/auth/google"
+                    className="btn"
+                    style={{
+                      background: '#3b82f6',
+                      color: '#fff',
+                      textDecoration: 'none',
+                      padding: '0.45rem 1rem',
+                      fontSize: '0.88rem',
+                      fontWeight: 600,
+                      borderRadius: '4px',
+                      display: 'inline-block'
+                    }}
+                  >
+                    Connect Gmail Account ↗
+                  </a>
+                )}
+              </div>
+            </div>
+          </section>
+
           {/* Profile Section */}
           <section className="card">
             <h2>Candidate Profile & Resume (LLM Context)</h2>
@@ -974,10 +1602,27 @@ export default function AutoPage() {
                 </label>
               </div>
               {profile.resume_path ? (
-                <p className="muted" style={{ fontSize: '0.85rem', marginTop: '0.4rem' }}>
-                  Stored at: <code>{profile.resume_path}</code> ({profile.resume_text?.length || 0} chars extracted)
+                <div style={{ marginTop: '0.8rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#18181b', border: '1px solid #27272a', padding: '0.65rem 0.9rem', borderRadius: '6px', flexWrap: 'wrap', gap: '0.6rem' }}>
+                  <div>
+                    <span style={{ color: '#10b981', fontWeight: 600, fontSize: '0.86rem' }}>📎 PDF Attached: </span>
+                    <code style={{ fontSize: '0.83rem', color: '#93c5fd' }}>{profile.resume_path}</code>
+                    <span className="muted" style={{ fontSize: '0.8rem', marginLeft: '0.5rem' }}>({profile.resume_text?.length || 0} chars extracted)</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost"
+                    onClick={handleRemoveResume}
+                    style={{ color: '#f87171', borderColor: '#ef4444', fontSize: '0.8rem', padding: '0.25rem 0.65rem' }}
+                    title="Remove PDF resume attachment from outgoing emails"
+                  >
+                    ✕ Remove Resume Attachment
+                  </button>
+                </div>
+              ) : (
+                <p className="muted" style={{ fontSize: '0.82rem', marginTop: '0.5rem', color: '#a1a1aa' }}>
+                  ℹ️ No PDF file currently attached. Your emails will include your live portfolio/resume link (<code>dub.sh/pratyush</code>) cleanly in the email signature without attaching a physical file.
                 </p>
-              ) : null}
+              )}
             </div>
           </section>
 

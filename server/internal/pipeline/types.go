@@ -4,6 +4,7 @@ package pipeline
 type PostExtractionResult struct {
 	IsHiringPost        bool     `json:"is_hiring_post"`
 	Emails              []string `json:"emails"`
+	Phones              []string `json:"phones,omitempty"`
 	Company             string   `json:"company"`
 	Role                string   `json:"role"`
 	WorkMode            string   `json:"work_mode"` // "remote", "onsite", "hybrid", "unknown"

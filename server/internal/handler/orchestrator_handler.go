@@ -17,7 +17,7 @@ type OrchestratorController interface {
 	GetStatus(ctx context.Context) (*orchestrator.OrchestratorStatus, error)
 	ToggleAuto(ctx context.Context, enabled bool) bool
 	KillSwitch(ctx context.Context)
-	RunPipeline(ctx context.Context, trigger, timeFilter, sortBy string, maxPosts int) (*model.Run, error)
+	RunPipeline(ctx context.Context, trigger, query, timeFilter, sortBy string, maxPosts int) (*model.Run, error)
 	ArmManualRun(ctx context.Context, now time.Time)
 }
 
@@ -120,19 +120,25 @@ func (h *OrchestratorHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload struct {
+		Query      string `json:"query"`
 		TimeFilter string `json:"time_filter"`
 		SortBy     string `json:"sort_by"`
 		MaxPosts   int    `json:"max_posts"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 
-	run, err := h.orc.RunPipeline(r.Context(), "manual", payload.TimeFilter, payload.SortBy, payload.MaxPosts)
+	run, err := h.orc.RunPipeline(r.Context(), "manual", payload.Query, payload.TimeFilter, payload.SortBy, payload.MaxPosts)
+	status, _ := h.orc.GetStatus(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"error":   err.Error(),
+			"message": err.Error(),
+			"run":     run,
+			"status":  status,
+		})
 		return
 	}
 
-	status, _ := h.orc.GetStatus(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message": "pipeline run initiated and engine armed for today",
 		"run":     run,

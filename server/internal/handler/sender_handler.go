@@ -13,7 +13,7 @@ type SenderController interface {
 	Resume()
 	StopAll(ctx context.Context) error
 	GetStatus(ctx context.Context) (*sender.StatusReport, error)
-	SendNext(ctx context.Context) (*sender.SendResult, error)
+	SendNext(ctx context.Context, force bool) (*sender.SendResult, error)
 }
 
 // SenderHandler manages HTTP requests for pause, resume, stop-all, and sender monitoring.
@@ -98,7 +98,8 @@ func (h *SenderHandler) SendNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.sender.SendNext(r.Context())
+	force := r.URL.Query().Get("force") == "true"
+	result, err := h.sender.SendNext(r.Context(), force)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

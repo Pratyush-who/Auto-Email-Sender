@@ -87,7 +87,7 @@ func (r *PostRepository) GetPosts(ctx context.Context, limit, offset int) ([]mod
 	}
 
 	if limit <= 0 {
-		limit = 50
+		limit = 500
 	}
 
 	query := `
@@ -125,6 +125,20 @@ func (r *PostRepository) GetPosts(ctx context.Context, limit, offset int) ([]mod
 	}
 
 	return posts, nil
+}
+
+// ClearAllPosts deletes all posts from the posts table.
+func (r *PostRepository) ClearAllPosts(ctx context.Context) error {
+	if r.pool == nil {
+		return errors.New("database pool is not initialized")
+	}
+
+	query := `DELETE FROM posts`
+	_, err := r.pool.Exec(ctx, query)
+	if err != nil {
+		return fmt.Errorf("failed to clear posts: %w", err)
+	}
+	return nil
 }
 
 // HasPostWithURL checks whether a post URL has already been scraped and stored.

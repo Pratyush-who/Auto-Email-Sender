@@ -250,8 +250,16 @@ func (c *GeminiClient) executePromptWithRetry(ctx context.Context, prompt string
 			continue
 		}
 
-		// Retry on 429 Too Many Requests or 5xx Server Errors
-		if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode <= 599) {
+		// If daily free quota limit is reached, fail immediately without useless retries
+		if resp.StatusCode == http.StatusTooManyRequests {
+			if strings.Contains(string(respBytes), "RESOURCE_EXHAUSTED") || strings.Contains(string(respBytes), "limit: 20") {
+				return "", fmt.Errorf("gemini daily quota exhausted (20 req/day limit reached): %s", string(respBytes))
+			}
+			lastErr = fmt.Errorf("gemini api returned status 429: %s", string(respBytes))
+			continue
+		}
+
+		if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
 			lastErr = fmt.Errorf("gemini api returned status %d: %s", resp.StatusCode, string(respBytes))
 			continue
 		}

@@ -205,7 +205,7 @@ func TestPipeline_PostSkipped_LowTrustScore(t *testing.T) {
 	if res.Passed {
 		t.Fatalf("expected shady post to be skipped due to low trust score or spam flag")
 	}
-	if !strings.Contains(res.Reason, "trust score") && !strings.Contains(res.Reason, "SPAM / FAKE POST FLAGGED") {
+	if !strings.Contains(res.Reason, "trust score") && !strings.Contains(res.Reason, "SPAM") && !strings.Contains(res.Reason, "SCAM") {
 		t.Errorf("expected trust score or spam flag skip reason, got: %s", res.Reason)
 	}
 }
@@ -222,7 +222,7 @@ func (m *multiResponseFakeClient) GenerateJSON(ctx context.Context, prompt strin
 			return json.Unmarshal([]byte(resp), out)
 		}
 	}
-	if strings.Contains(lowerPrompt, "recruiter and job scraper") {
+	if strings.Contains(lowerPrompt, "recruiter and job scraper") || strings.Contains(lowerPrompt, "extract structured data") {
 		if resp, ok := m.responses["hiring"]; ok {
 			return json.Unmarshal([]byte(resp), out)
 		}
