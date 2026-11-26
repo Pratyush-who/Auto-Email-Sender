@@ -16,12 +16,12 @@ A complete, full-stack autonomous job prospecting and cold outreach platform bui
                            HTTP / REST (Port 8080)
                                      v
 +------------------------------------+------------------------------------+
-|                        Go Server (:8080)                                |
+|                    Go Server (Docker :8080)                             |
 | - Chi Router, CORS, Structured Slog                                     |
-| - Pipeline (Scrape -> Extract -> Filter -> Verify -> Compose -> Queue)  |
+| - Pipeline (Scrape -> Extract -> Filter -> Verify -> Batch Compose)     |
 | - Orchestrator (2h ticker, "Armed" day model, sleep/restart recovery)   |
 | - 30-min Thread Poller (detects replies, bounces & drafts follow-ups)   |
-| - Safe Dispatcher (daily cap, send window, randomized gaps, dedupe)     |
+| - Safe Dispatcher (100/day cap, send window, randomized gaps, dedupe)   |
 +---------+--------------------------+-------------------------+----------+
           |                          |                         |
           v                          v                         v
@@ -30,7 +30,7 @@ A complete, full-stack autonomous job prospecting and cold outreach platform bui
 |  (Docker Compose) |      |  (Structured JSON)|     |  (OAuth 2.0 Code)  |
 +-------------------+      +-------------------+     +--------------------+
           ^
-          | HTTP (:3001)
+          | HTTP (host.docker.internal:3001)
 +------------------------------------+
 |  Playwright Worker (Host Node.js)  |
 | - Persistent Headed Chrome Profile |
@@ -38,11 +38,11 @@ A complete, full-stack autonomous job prospecting and cold outreach platform bui
 +------------------------------------+
 ```
 
-- **Frontend (`/` & `/auto`)**: React 19 + Vite 8.
+- **Frontend (`/` & `/auto`)**: React 19 + Vite 8 (runs in Docker `emailauto-web` on `:5173` or locally via `npm run dev`).
   - `/`: Original manual multi-recipient email sender.
-  - `/auto`: Autonomous Job Hunter dashboard featuring live telemetry, armed safety status, daily cap meters, multiselect draft review, reply & bounce tracking, and run logs.
-- **Go Server (`/server`)**: Go 1.22 with Chi router, pgxpool, and golang-migrate. Runs in Docker or as a native binary.
-- **Worker (`/worker`)**: Node.js + Playwright running directly on your host machine with a persistent headed Chrome profile directory (`worker/user_data`) so LinkedIn logins survive restarts.
+  - `/auto`: Autonomous Job Hunter dashboard featuring live scrape/send telemetry, armed safety status, daily cap meters (default `100/day`), multiselect draft review, reply & bounce tracking, and run logs.
+- **Go Server (`/server`)**: Go 1.22+ with Chi router, pgxpool, and golang-migrate (runs in Docker `emailauto-server` on `:8080` or natively).
+- **Worker (`/worker`)**: Node.js + Playwright running directly on your host machine (`:3001`) with a persistent headed Chrome profile (`worker/user_data`) so LinkedIn logins survive restarts. The Dockerized Go server reaches it via `http://host.docker.internal:3001`.
 - **LLM (`server/internal/llm`)**: Google Gemini 2.5 Flash via REST with schema enforcement (`application/json`), token & latency logging, and exponential backoff retry.
 - **Gmail Service (`server/internal/gmail`)**: Server-side OAuth 2.0 with offline access, AES-GCM encrypted refresh token storage, RFC 2822 MIME compilation, and thread monitoring.
 
@@ -86,18 +86,46 @@ UPLOAD_DIR=./uploads
 
 ---
 
-### Step 2: Start PostgreSQL & Database
+### ⚡ One-Command Startup (Recommended on Windows)
 
-Start the PostgreSQL 16 database using Docker Compose:
+Once your `.env` and `server/.env` files are configured and Docker Desktop is running, start the entire stack (`postgres`, `server`, `web` in Docker + Playwright `worker` on host) with a single command from the root directory:
+
 ```bash
-docker compose up -d postgres
+npm run start:all
 ```
 
-The database container runs on `localhost:5432` and mounts migrations automatically on startup.
+What [`start.ps1`](start.ps1) does:
+1. Runs `docker compose up -d --build` to start `emailauto-postgres` (`:5432`), `emailauto-server` (`:8080`), and `emailauto-web` (`:5173`).
+2. Checks port `3001` and stops any stale worker process so startup never fails with `EADDRINUSE`.
+3. Starts the Playwright Chrome Worker (`worker/src/index.js`) on `http://localhost:3001`.
+
+Useful Docker commands:
+```bash
+# Rebuild and restart only the Go API server after backend edits
+docker compose up -d --build server
+
+# View logs for Docker services
+docker compose logs -f server web
+
+# Stop all Docker containers
+docker compose down
+```
 
 ---
 
-### Step 3: Start the Playwright Worker on the Host
+### Manual Step-by-Step Setup
+
+#### Step 2: Start Docker Services (PostgreSQL, Go Server, Web UI)
+
+Start all containerized services using Docker Compose:
+```bash
+docker compose up -d --build
+```
+- `postgres` runs on `127.0.0.1:5432` with persistent volume `postgres_data` and automatic startup migrations.
+- `server` runs on `127.0.0.1:8080` and connects to the host worker via `http://host.docker.internal:3001`.
+- `web` runs on `127.0.0.1:5173`.
+
+#### Step 3: Start the Playwright Worker on the Host
 
 > **IMPORTANT**: The worker must run on your host machine (not in Docker) to display the headed Chrome browser for manual LinkedIn authentication.
 
@@ -108,39 +136,24 @@ npm start
 ```
 The worker will listen on `http://localhost:3001`.
 
-#### 🔑 First-Time LinkedIn Authentication Flow
+##### 🔑 First-Time LinkedIn Authentication Flow
 1. On the very first run, Playwright opens a persistent Chrome window pointing to `worker/user_data`.
 2. Navigate to [linkedin.com](https://www.linkedin.com) in that window and log in to your account.
 3. Complete any two-factor verification.
 4. Your session cookies and credentials remain securely persisted in `worker/user_data/`. You will not need to log in again.
 
----
+#### Step 4: (Optional) Run Server & Frontend Natively Outside Docker
 
-### Step 4: Start the Go Server
-
-You can run the Go server either directly or via Docker:
-
-**Option A: Running Locally (Recommended for Development)**
+If you prefer running the Go server or Vite frontend directly on your host:
 ```bash
-cd server
+# Go server (in ./server)
 go run cmd/api/main.go
-```
 
-**Option B: Running via Docker Compose**
-```bash
-docker compose up -d
-```
-The server will start on `http://localhost:8080`.
-
----
-
-### Step 5: Start the Frontend UI
-
-In the root directory:
-```bash
+# Vite frontend (in root)
 npm install
 npm run dev
 ```
+
 Open **[http://localhost:5173/auto](http://localhost:5173/auto)** in your browser.
 
 ---
@@ -150,6 +163,27 @@ Open **[http://localhost:5173/auto](http://localhost:5173/auto)** in your browse
 1. Open `http://localhost:8080/auth/google` in your browser (or click the connect prompt in `/auto`).
 2. Grant permissions for `gmail.send`, `gmail.readonly`, and `userinfo.email`.
 3. You will be redirected back to the dashboard with your offline refresh token securely encrypted in PostgreSQL.
+
+---
+
+## ⚙️ How the Pipeline & Batching Work
+
+1. **LinkedIn Scraper (`worker/src/scraper.js`, `worker/src/parser.js`)**:
+   - Launches a persistent headed Chrome session (`worker/user_data`) and opens LinkedIn content search with your query, time filter (`24h` / `7d`), and sort order.
+   - Scrolls through the feed (up to `250` scrolls or `maxPosts`, clicking `"Show more results"` when visible) and stops cleanly after 6 consecutive scrolls with no new posts.
+   - Deduplicates by post URL and content fingerprint, extracting author, post text, timestamp, and direct post permalink.
+2. **Extraction & Regex Cross-Check (`server/internal/pipeline/extractor.go`)**:
+   - Runs fast deterministic regex & keyword rules alongside Gemini 2.5 Flash structured JSON extraction.
+   - Extracts emails, phones, company, role, work mode, paid/unpaid status, stipend, required subject line, and flags `#OpenToWork` / job-seeker posts so they are never treated as hiring posts.
+3. **Filtering & Company Verification (`server/internal/filter/filter.go`, `verifier.go`)**:
+   - Applies your settings (skip unpaid, min stipend, work mode, allowed locations, experience bounds, include/exclude keywords).
+   - Verifies email domain & computes a trust score (default threshold `40`).
+4. **Batch Email Composition (`server/internal/pipeline/pipeline.go`, `server/internal/composer/composer.go`)**:
+   - Deduplicates contacts by email and skips contacts who already have an initial outreach.
+   - Groups eligible posts into batches of up to **15 posts per Gemini API call** (`ComposeBatch`) to save quota while generating tailored, company-specific subject lines and plain-text emails with your exact signature and no location/filler fluff.
+5. **Approval, Queue & Gmail Dispatch (`server/internal/sender/sender.go`)**:
+   - Drafts land in **Drafts & Approvals** (`approval_mode = true`) or directly in the send queue.
+   - Dispatches via Gmail API with your uploaded PDF resume attached, enforcing the daily cap (default `100`), send window (`09:00-19:00 IST`), and randomized gaps (`2-6` min).
 
 ---
 
