@@ -100,6 +100,7 @@ func SetupRouter(deps RouterDependencies) *chi.Mux {
 
 		// Outreach & Composer
 		api.Get("/outreach", outreachHandler.ListOutreach)
+		api.Delete("/outreach/queue", outreachHandler.ClearQueue)
 		api.Get("/outreach/{id}", outreachHandler.GetOutreach)
 		api.Put("/outreach/{id}", outreachHandler.UpdateOutreach)
 		api.Post("/outreach/{id}/approve", outreachHandler.ApproveOutreach)

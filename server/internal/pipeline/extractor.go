@@ -171,16 +171,48 @@ func ExtractPostWithRegex(postText string) *PostExtractionResult {
 		}
 	}
 
+	// Detect DM / direct message instructions
+	applyViaDM := false
+	dmPhrases := []string{
+		"dm me", "dm us", "send a dm", "drop a dm", "message me", "message us",
+		"inbox me", "ping me", "reach out via dm", "connect and message", "direct message",
+	}
+	for _, phrase := range dmPhrases {
+		if strings.Contains(lowerText, phrase) {
+			applyViaDM = true
+			break
+		}
+	}
+
+	// Extract required subject line if specified (e.g. "Subject: Flutter Developer - Karachi")
+	requiredSubject := ""
+	subjRegex := regexp.MustCompile(`(?im)^(?:\s*(?:email\s+)?subject(?:\s+line)?\s*[:\-]\s*)(.+)$`)
+	if m := subjRegex.FindStringSubmatch(postText); len(m) > 1 {
+		requiredSubject = strings.TrimSpace(m[1])
+		if len(requiredSubject) > 120 {
+			requiredSubject = requiredSubject[:120]
+		}
+	}
+
+	applyInstructions := "Apply via email or contact details in post"
+	if len(emails) == 0 && applyViaDM {
+		applyInstructions = "Message / DM directly on LinkedIn"
+	} else if len(emails) == 0 && len(phones) > 0 {
+		applyInstructions = "Contact via Phone / WhatsApp"
+	}
+
 	return &PostExtractionResult{
-		IsHiringPost:      isHiring,
-		Emails:            emails,
-		Phones:            phones,
-		Company:           company,
-		Role:              role,
-		WorkMode:          workMode,
-		PaidStatus:        paidStatus,
-		ApplyViaEmail:     len(emails) > 0,
-		ApplyInstructions: "Apply via email or contact details in post",
+		IsHiringPost:        isHiring,
+		Emails:              emails,
+		Phones:              phones,
+		Company:             company,
+		Role:                role,
+		WorkMode:            workMode,
+		PaidStatus:          paidStatus,
+		ApplyViaEmail:       len(emails) > 0,
+		ApplyViaDM:          applyViaDM,
+		RequiredSubjectLine: requiredSubject,
+		ApplyInstructions:   applyInstructions,
 	}
 }
 

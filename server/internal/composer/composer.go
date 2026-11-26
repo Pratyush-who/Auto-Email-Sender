@@ -16,6 +16,13 @@ type ComposedEmail struct {
 	Body    string `json:"body"`
 }
 
+// BatchComposeItem represents one job post to be drafted in a batch Gemini call.
+type BatchComposeItem struct {
+	PostID         string
+	Post           model.Post
+	CompanySummary string
+}
+
 // Composer handles crafting customized cold outreach emails via LLM with strict guardrails.
 type Composer struct {
 	llmClient llm.Client
@@ -177,6 +184,144 @@ Return JSON with "subject" and "body".`,
 	}
 
 	return lastEmail, nil
+}
+
+// ComposeBatch generates tailored cold emails for up to 10 posts in a single Gemini API call,
+// saving API quota while keeping each email company- and role-specific.
+func (c *Composer) ComposeBatch(
+	ctx context.Context,
+	profile model.Profile,
+	items []BatchComposeItem,
+	existingBodiesToday []string,
+) (map[string]ComposedEmail, error) {
+	results := make(map[string]ComposedEmail, len(items))
+	if len(items) == 0 {
+		return results, nil
+	}
+
+	if c.llmClient == nil {
+		for _, item := range items {
+			results[item.PostID] = *c.fallbackDraft(profile, item.Post)
+		}
+		return results, nil
+	}
+
+	var jobsBuilder strings.Builder
+	for i, item := range items {
+		role := strings.TrimSpace(item.Post.Role)
+		if role == "" {
+			role = "Software Engineer"
+		}
+		company := strings.TrimSpace(item.Post.Company)
+		if company == "" {
+			company = "the hiring team"
+		}
+		postText := strings.TrimSpace(item.Post.Text)
+		if len(postText) > 650 {
+			postText = postText[:650] + "..."
+		}
+		reqSubj := strings.TrimSpace(item.Post.Extracted.RequiredSubjectLine)
+		subjNote := "None"
+		if reqSubj != "" {
+			subjNote = reqSubj
+		}
+		jobsBuilder.WriteString(fmt.Sprintf(
+			"--- JOB %d ---\npost_id: %s\ncompany: %s\nrole: %s\nauthor: %s\nrequired_subject: %s\npost_text:\n%s\n\n",
+			i+1, item.PostID, company, role, item.Post.Author, subjNote, postText,
+		))
+	}
+
+	prompt := fmt.Sprintf(`You are writing concise, authentic developer application emails on behalf of Pratyush Mehra for a batch of %d job posts.
+For EACH job post below, write a distinct, company-specific cold email referencing that company's product, domain, or stack mentioned in their post.
+
+CANDIDATE INFORMATION:
+- Name: Pratyush Mehra
+- Experience: 2+ years building and deploying responsive production apps with REST APIs, clean code, and proper state management.
+- Stacks: Flutter/Dart, GoLang, Spring Boot, System Design, REST APIs, PostgreSQL.
+- Apps: Deployed production apps from scratch with 100k+ downloads.
+
+REQUIRED EMAIL STRUCTURE FOR EACH:
+1. Greeting: "Hello," or "Hello <FirstName>," (if recruiter name is known).
+2. Tailored intro sentence:
+   - Flutter / Mobile: "I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience in building and deploying responsive apps using REST APIs, clean code, and proper state management."
+   - Go / Backend: "I'm Pratyush Mehra, a Go / Backend developer with 2+ years of experience in building and deploying high-performance services using REST APIs, clean code, and scalable architecture."
+   - Full Stack / Frontend: "I'm Pratyush Mehra, a Full Stack / Frontend developer with 2+ years of experience in building and deploying responsive applications using REST APIs, clean code, and proper state management."
+3. 3-4 crisp bullet points tailored to that specific company & post requirements:
+   • Focus on clean UI, scalable architecture, and writing production ready code
+   • Worked on large userbase apps with over 100k+ downloads and deployed apps from scratch
+   • Hands-on knowledge across Flutter, GoLang, Spring Boot, and system design concepts
+   • A customized closing bullet mentioning why Pratyush fits that company's product/team
+4. Exact Signature:
+Thanks for your time.
+– Pratyush Mehra
+8005331766
+pratyushwho.xyz
+GitHub: https://github.com/Pratyush-who
+LinkedIn: https://www.linkedin.com/in/pratyushmehra22/
+Resume-- dub.sh/pratyush
+
+RULES:
+- NEVER mention location, relocation, remote, or onsite work arrangements.
+- If required_subject is not "None", use that exact subject line.
+- Plain text only (no markdown code blocks, no emojis).
+- Return JSON object {"drafts": [{"post_id": "...", "subject": "...", "body": "..."}]} containing one entry per job.
+
+JOBS:
+%s`, len(items), jobsBuilder.String())
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"drafts": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"post_id": map[string]any{"type": "string"},
+						"subject": map[string]any{"type": "string"},
+						"body":    map[string]any{"type": "string"},
+					},
+					"required": []string{"post_id", "subject", "body"},
+				},
+			},
+		},
+		"required": []string{"drafts"},
+	}
+
+	var resp struct {
+		Drafts []struct {
+			PostID  string `json:"post_id"`
+			Subject string `json:"subject"`
+			Body    string `json:"body"`
+		} `json:"drafts"`
+	}
+
+	if err := c.llmClient.GenerateJSON(ctx, prompt, schema, &resp); err != nil {
+		c.logger.Warn("batch llm composition failed, falling back to tailored templates", "count", len(items), "error", err)
+		for _, item := range items {
+			results[item.PostID] = *c.fallbackDraft(profile, item.Post)
+		}
+		return results, nil
+	}
+
+	for _, d := range resp.Drafts {
+		if strings.TrimSpace(d.PostID) == "" || strings.TrimSpace(d.Body) == "" {
+			continue
+		}
+		results[d.PostID] = ComposedEmail{
+			Subject: strings.TrimSpace(d.Subject),
+			Body:    strings.ReplaceAll(strings.TrimSpace(d.Body), "```", ""),
+		}
+	}
+
+	// Ensure every item has a draft even if LLM omitted one
+	for _, item := range items {
+		if _, ok := results[item.PostID]; !ok {
+			results[item.PostID] = *c.fallbackDraft(profile, item.Post)
+		}
+	}
+
+	return results, nil
 }
 
 func (c *Composer) fallbackDraft(profile model.Profile, post model.Post) *ComposedEmail {

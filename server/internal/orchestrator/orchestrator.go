@@ -72,6 +72,11 @@ type PipelineService interface {
 	ProcessPost(ctx context.Context, post *model.Post, settings model.Settings) (*pipeline.ProcessPostResult, error)
 }
 
+// BatchPipelineService is an optional interface for batched post processing and 10-post LLM drafting.
+type BatchPipelineService interface {
+	ProcessAndDraftBatch(ctx context.Context, posts []model.Post, settings model.Settings) ([]pipeline.ProcessPostResult, error)
+}
+
 // OutreachCounter defines access to sent counts.
 type OutreachCounter interface {
 	CountSentToday(ctx context.Context) (int, error)
@@ -479,13 +484,14 @@ func (o *Orchestrator) RunPipeline(
 		return runRecord, fmt.Errorf("%s", issue)
 	}
 
-	// 3. Process & dedupe posts
+	// 3. Process & dedupe posts (with batched 10-post Gemini drafting when available)
 	foundCount := len(scrapeRes.Posts)
 	filteredCount := 0
 	verifiedCount := 0
 	skippedCount := 0
 	draftedCount := 0
 
+	var newPosts []model.Post
 	for _, sp := range scrapeRes.Posts {
 		// DEDUPE: skip already seen posts by URL
 		if o.postStore != nil {
@@ -496,18 +502,20 @@ func (o *Orchestrator) RunPipeline(
 			}
 		}
 
-		post := model.Post{
+		newPosts = append(newPosts, model.Post{
 			URL:     sp.URL,
 			Author:  sp.Author,
 			Text:    sp.Text,
 			Status:  "new",
 			FoundAt: time.Now().UTC(),
-		}
+		})
+	}
 
-		if o.pipeline != nil {
-			filteredCount++
-			res, err := o.pipeline.ProcessPost(ctx, &post, settings)
-			if err == nil && res != nil {
+	if o.pipeline != nil && len(newPosts) > 0 {
+		filteredCount = len(newPosts)
+		if batchPipe, ok := o.pipeline.(BatchPipelineService); ok {
+			results, _ := batchPipe.ProcessAndDraftBatch(ctx, newPosts, settings)
+			for _, res := range results {
 				if res.Passed {
 					verifiedCount++
 					if res.Outreach != nil {
@@ -516,8 +524,22 @@ func (o *Orchestrator) RunPipeline(
 				} else {
 					skippedCount++
 				}
-			} else {
-				skippedCount++
+			}
+		} else {
+			for i := range newPosts {
+				res, err := o.pipeline.ProcessPost(ctx, &newPosts[i], settings)
+				if err == nil && res != nil {
+					if res.Passed {
+						verifiedCount++
+						if res.Outreach != nil {
+							draftedCount++
+						}
+					} else {
+						skippedCount++
+					}
+				} else {
+					skippedCount++
+				}
 			}
 		}
 	}

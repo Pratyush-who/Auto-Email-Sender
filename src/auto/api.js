@@ -29,6 +29,16 @@ export const api = {
     }
   },
 
+  async getWorkerProgress() {
+    try {
+      const res = await fetch('http://localhost:3001/status')
+      if (!res.ok) return null
+      return await res.json()
+    } catch {
+      return null
+    }
+  },
+
   async getDashboardSummary() {
     try {
       return await request('/api/orchestrator/status')
@@ -146,6 +156,10 @@ export const api = {
       await this.skipOutreach(id)
     }
     return { success: true, count: ids.length }
+  },
+
+  async clearQueue() {
+    return request('/api/outreach/queue', { method: 'DELETE' })
   },
 
   async bulkSendOutreach(ids) {

@@ -18,6 +18,7 @@ type PostExtractionResult struct {
 	ApplyInstructions   string   `json:"apply_instructions"`
 	RequiredSubjectLine string   `json:"required_subject_line"`
 	ApplyViaEmail       bool     `json:"apply_via_email"`
+	ApplyViaDM          bool     `json:"apply_via_dm,omitempty"`
 	IsSuspicious        bool     `json:"is_suspicious"`
 	SuspicionReason     string   `json:"suspicion_reason"`
 }

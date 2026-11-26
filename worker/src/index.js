@@ -14,7 +14,15 @@ const USER_DATA_DIR = process.env.USER_DATA_DIR || './user_data'
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
-const guardrails = new Guardrails('./data', { maxRunsPerDay: 100, maxPostsPerRun: 300 })
+const guardrails = new Guardrails('./data', { maxRunsPerDay: 100, maxPostsPerRun: 500 })
+
+let liveProgress = {
+  active: false,
+  query: '',
+  scrolls: 0,
+  extractedCount: 0,
+  message: '',
+}
 
 // Health check
 app.get('/health', (req, res) => {
@@ -33,6 +41,7 @@ app.get('/status', (req, res) => {
     runsToday: guardrails.getTodayRunCount(),
     maxRunsPerDay: guardrails.maxRunsPerDay,
     maxPostsPerRun: guardrails.maxPostsPerRun,
+    progress: liveProgress,
   })
 })
 
@@ -59,6 +68,13 @@ app.post('/scrape', async (req, res) => {
 
   try {
     console.log(`[Worker] Starting scrape run: query="${query}", filter=${timeFilter}, sort=${sortBy}, max=${clampedMaxPosts}`)
+    liveProgress = {
+      active: true,
+      query: query.trim(),
+      scrolls: 0,
+      extractedCount: 0,
+      message: 'Opening LinkedIn search results...',
+    }
 
     const result = await scrapeLinkedInPosts({
       query: query.trim(),
@@ -67,6 +83,15 @@ app.post('/scrape', async (req, res) => {
       maxPosts: clampedMaxPosts,
       userDataDir: USER_DATA_DIR,
       guardrails,
+      onProgress: (prog) => {
+        liveProgress = {
+          active: true,
+          query: query.trim(),
+          scrolls: prog.scroll,
+          extractedCount: prog.extractedCount,
+          message: prog.message,
+        }
+      },
     })
 
     if (!result.success && result.alert === 'CAPTCHA_OR_LOGIN_WALL') {
@@ -89,6 +114,7 @@ app.post('/scrape', async (req, res) => {
       message: err.message,
     })
   } finally {
+    liveProgress = { ...liveProgress, active: false }
     guardrails.releaseRunLock()
   }
 })

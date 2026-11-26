@@ -113,16 +113,13 @@ func main() {
 		composerService = composer.NewComposer(geminiClient, logger)
 	}
 
-	// Initialize Extraction & Verification Pipeline
-	var pipelineService *pipeline.Pipeline
-	if geminiClient != nil {
-		domainCache := pipeline.NewDomainCache(settingsRepo)
-		extractor := pipeline.NewPostExtractor(geminiClient)
-		verifier := pipeline.NewCompanyVerifier(geminiClient, domainCache, nil, nil, logger)
-		pipelineService = pipeline.NewPipeline(extractor, verifier, postStore, contactRepo, logger)
-		if composerService != nil {
-			pipelineService.WithComposer(composerService, profileStore, outreachRepo)
-		}
+	// Initialize Extraction & Verification Pipeline (regex + DNS/MX, saving Gemini quota strictly for batched email composition)
+	domainCache := pipeline.NewDomainCache(settingsRepo)
+	extractor := pipeline.NewPostExtractor(nil)
+	verifier := pipeline.NewCompanyVerifier(nil, domainCache, nil, nil, logger)
+	pipelineService := pipeline.NewPipeline(extractor, verifier, postStore, contactRepo, logger)
+	if composerService != nil {
+		pipelineService.WithComposer(composerService, profileStore, outreachRepo)
 	}
 
 	// Initialize Gmail service

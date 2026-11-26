@@ -37,6 +37,7 @@ type OutreachStore interface {
 // ComposerService defines email drafting capabilities.
 type ComposerService interface {
 	Compose(ctx context.Context, profile model.Profile, post model.Post, companySummary string, existingBodiesToday []string) (*composer.ComposedEmail, error)
+	ComposeBatch(ctx context.Context, profile model.Profile, items []composer.BatchComposeItem, existingBodiesToday []string) (map[string]composer.ComposedEmail, error)
 }
 
 // ProcessPostResult captures the outcome of processing a post.
@@ -90,6 +91,10 @@ func (p *Pipeline) WithComposer(c ComposerService, ps ProfileStore, os OutreachS
 
 // ProcessPost runs extraction, filtering, verification, and persistence for a single post.
 func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings model.Settings) (*ProcessPostResult, error) {
+	return p.processPostInternal(ctx, post, settings, true)
+}
+
+func (p *Pipeline) processPostInternal(ctx context.Context, post *model.Post, settings model.Settings, draftImmediately bool) (*ProcessPostResult, error) {
 	if post == nil {
 		return nil, fmt.Errorf("post cannot be nil")
 	}
@@ -131,6 +136,7 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 	post.Extracted.Phones = extracted.Phones
 	post.Extracted.RequiredSubjectLine = extracted.RequiredSubjectLine
 	post.Extracted.ApplyInstructions = extracted.ApplyInstructions
+	post.Extracted.ApplyViaDM = extracted.ApplyViaDM
 	if extracted.StipendAmount != nil {
 		post.Extracted.Stipend = extracted.StipendAmount
 	}
@@ -160,18 +166,30 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 		return &ProcessPostResult{Post: post, Passed: false, Reason: post.SkipReason}, nil
 	}
 
-	// Step 4: Check if valid contact emails exist
+	// Step 4: Check if valid contact emails exist (surface Phone or DM instructions clearly if no email)
 	if len(extracted.Emails) == 0 {
 		post.Status = "skipped"
-		post.SkipReason = "no application email found in post"
+		if len(extracted.Phones) > 0 {
+			post.SkipReason = "no email found — contact via Phone / WhatsApp"
+		} else if extracted.ApplyViaDM {
+			post.SkipReason = "no email found — DM directly on LinkedIn"
+		} else {
+			post.SkipReason = "no application email found in post"
+		}
 		if p.postStore != nil {
 			post, _ = p.postStore.SavePost(ctx, post)
 		}
 		return &ProcessPostResult{Post: post, Passed: false, Reason: post.SkipReason}, nil
 	}
 
-	// Step 5: Apply filter rules against settings (experience, stipend, keywords, work mode, etc.)
-	passFilter, filterReason := filter.ApplyFilters(*post, settings)
+	// Step 5: Apply filter rules against settings.
+	// When manual approval mode is enabled, do not drop onsite or unknown-paid posts so user can review & decide in Approvals.
+	effectiveSettings := settings
+	if settings.ApprovalMode {
+		effectiveSettings.WorkModes = nil
+		effectiveSettings.SkipUnknownPaid = false
+	}
+	passFilter, filterReason := filter.ApplyFilters(*post, effectiveSettings)
 	if !passFilter {
 		post.Status = "skipped"
 		post.SkipReason = filterReason
@@ -305,9 +323,9 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 		}
 	}
 
-	// Step 7: Automated Draft Composition for Passed Post
+	// Step 7: Automated Draft Composition for Passed Post (when not deferred to batch drafting)
 	var outreach *model.Outreach
-	if p.composer != nil && p.profileStore != nil && p.outreachStore != nil && contact != nil {
+	if draftImmediately && p.composer != nil && p.profileStore != nil && p.outreachStore != nil && contact != nil {
 		profile, err := p.profileStore.Get(ctx)
 		if err == nil && profile != nil {
 			hasInit, _ := p.outreachStore.HasExistingInitialOutreach(ctx, contact.ID)
@@ -331,14 +349,14 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 						Body:      compEmail.Body,
 						Status:    status,
 					})
-					if err == nil {
+					if err == nil && created != nil {
 						outreach = created
+						p.logger.Info("automated outreach draft generated",
+							"outreach_id", outreach.ID,
+							"status", status,
+							"subject", compEmail.Subject,
+						)
 					}
-					p.logger.Info("automated outreach draft generated",
-						"outreach_id", outreach.ID,
-						"status", status,
-						"subject", compEmail.Subject,
-					)
 				}
 			}
 		}
@@ -357,6 +375,133 @@ func (p *Pipeline) ProcessPost(ctx context.Context, post *model.Post, settings m
 		Outreach: outreach,
 		Passed:   true,
 	}, nil
+}
+
+// ProcessAndDraftBatch processes all posts in order, deduplicates contacts by email,
+// and generates company-specific drafts in batches of 10 per Gemini API call.
+func (p *Pipeline) ProcessAndDraftBatch(ctx context.Context, posts []model.Post, settings model.Settings) ([]ProcessPostResult, error) {
+	results := make([]ProcessPostResult, 0, len(posts))
+	if len(posts) == 0 {
+		return results, nil
+	}
+
+	type pendingDraft struct {
+		resultIdx int
+		item      composer.BatchComposeItem
+		contact   *model.Contact
+	}
+
+	var toDraft []pendingDraft
+	seenEmails := make(map[string]bool)
+
+	for i := range posts {
+		select {
+		case <-ctx.Done():
+			return results, ctx.Err()
+		default:
+		}
+
+		res, err := p.processPostInternal(ctx, &posts[i], settings, false)
+		if err != nil {
+			results = append(results, ProcessPostResult{
+				Post:   &posts[i],
+				Passed: false,
+				Reason: err.Error(),
+			})
+			continue
+		}
+		if res == nil {
+			continue
+		}
+
+		idx := len(results)
+		results = append(results, *res)
+
+		if res.Passed && res.Contact != nil && res.Post != nil {
+			emailKey := strings.ToLower(strings.TrimSpace(res.Contact.Email))
+			if emailKey == "" || seenEmails[emailKey] {
+				p.logger.Info("skipping duplicate email draft in batch", "email", emailKey, "post_id", res.Post.ID)
+				continue
+			}
+
+			if p.outreachStore != nil {
+				hasInit, _ := p.outreachStore.HasExistingInitialOutreach(ctx, res.Contact.ID)
+				if hasInit {
+					p.logger.Info("skipping draft: initial outreach already exists for email", "email", emailKey)
+					seenEmails[emailKey] = true
+					continue
+				}
+			}
+
+			seenEmails[emailKey] = true
+			toDraft = append(toDraft, pendingDraft{
+				resultIdx: idx,
+				item: composer.BatchComposeItem{
+					PostID:         res.Post.ID,
+					Post:           *res.Post,
+					CompanySummary: res.Post.Extracted.CompanySummary,
+				},
+				contact: res.Contact,
+			})
+		}
+	}
+
+	// Batch draft with Gemini dynamically based on total posts (up to 25 posts per Gemini API call)
+	if len(toDraft) > 0 && p.composer != nil && p.profileStore != nil && p.outreachStore != nil {
+		profile, err := p.profileStore.Get(ctx)
+		if err == nil && profile != nil {
+			bodiesToday, _ := p.outreachStore.GetSentBodiesToday(ctx)
+			batchSize := len(toDraft)
+			if batchSize > 15 {
+				batchSize = 15
+			}
+
+			for start := 0; start < len(toDraft); start += batchSize {
+				end := start + batchSize
+				if end > len(toDraft) {
+					end = len(toDraft)
+				}
+				chunk := toDraft[start:end]
+
+				batchItems := make([]composer.BatchComposeItem, len(chunk))
+				for j, pd := range chunk {
+					batchItems[j] = pd.item
+				}
+
+				composedMap, compErr := p.composer.ComposeBatch(ctx, *profile, batchItems, bodiesToday)
+				if compErr != nil {
+					p.logger.Warn("batch compose failed", "error", compErr)
+					continue
+				}
+
+				status := model.OutreachStatusQueued
+				if settings.ApprovalMode {
+					status = model.OutreachStatusDraft
+				}
+
+				for _, pd := range chunk {
+					compEmail, ok := composedMap[pd.item.PostID]
+					if !ok || strings.TrimSpace(compEmail.Body) == "" {
+						continue
+					}
+
+					created, err := p.outreachStore.CreateOutreach(ctx, &model.Outreach{
+						ContactID: pd.contact.ID,
+						PostID:    pd.item.PostID,
+						Kind:      model.OutreachKindInitial,
+						Subject:   compEmail.Subject,
+						Body:      compEmail.Body,
+						Status:    status,
+					})
+					if err == nil && created != nil {
+						results[pd.resultIdx].Outreach = created
+					}
+				}
+			}
+		}
+	}
+
+	return results, nil
 }
 
 // ProcessBatch processes a slice of posts, throttling between calls to stay comfortably under rate limits.

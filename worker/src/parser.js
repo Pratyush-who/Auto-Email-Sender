@@ -57,16 +57,63 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
     // Non-fatal
   }
 
-  // 2. Extract DOM content of feed cards
+  // 2. Extract DOM content of feed cards in exact visual order
   const rawPosts = await page.evaluate(() => {
-    // Collect potential card nodes from modern SDUI, classic containers, and search containers
-    let cards = Array.from(document.querySelectorAll(
-      'li.reusable-search__result-container, div.feed-shared-update-v2, div[data-view-name="feed-full-update"], [data-testid="lazy-column"] > div, div[data-urn*="activity"]'
-    ))
+    // Union all known LinkedIn post card selectors (classic, search results, and modern SDUI)
+    const selectors = [
+      'li.reusable-search__result-container',
+      'div[data-view-name="feed-full-update"]',
+      'div.feed-shared-update-v2',
+      'div[data-urn*="urn:li:activity"]',
+      'div[data-chameleon-result-urn*="urn:li:activity"]',
+      '[data-testid="lazy-column"] > div',
+      'div[role="listitem"]',
+    ]
 
-    if (cards.length === 0) {
-      cards = Array.from(document.querySelectorAll('.artdeco-card, div[data-display-contents="true"]'))
+    const candidateSet = new Set()
+    for (const sel of selectors) {
+      const els = document.querySelectorAll(sel)
+      for (const el of els) {
+        candidateSet.add(el)
+      }
     }
+
+    if (candidateSet.size === 0) {
+      for (const el of document.querySelectorAll('.artdeco-card, div[data-display-contents="true"]')) {
+        candidateSet.add(el)
+      }
+    }
+
+    const allCandidates = Array.from(candidateSet)
+    // Deduplicate nested elements: keep outermost container only when a parent is also a candidate,
+    // EXCEPT if the outer container has > 1 inner post cards (e.g. a wrapper div containing multiple posts).
+    const cards = allCandidates.filter((el) => {
+      // If this element contains multiple other candidate post cards, it's a list wrapper, not a single card
+      let childMatchCount = 0
+      for (const other of allCandidates) {
+        if (other !== el && el.contains(other)) {
+          childMatchCount++
+          if (childMatchCount > 1) return false
+        }
+      }
+      // If an ancestor is a single-post card (not a multi-card wrapper), skip this inner child
+      let parent = el.parentElement
+      while (parent) {
+        if (candidateSet.has(parent)) {
+          // Check if parent itself was kept as a single card (contains <= 1 candidate)
+          let parentChildCount = 0
+          for (const other of allCandidates) {
+            if (other !== parent && parent.contains(other)) {
+              parentChildCount++
+              if (parentChildCount > 1) break
+            }
+          }
+          if (parentChildCount <= 1) return false
+        }
+        parent = parent.parentElement
+      }
+      return true
+    })
 
     const results = []
 
@@ -75,7 +122,7 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
       const rawText = (card.innerText || '').trim()
 
       // Skip non-card spacers, tiny badges, feedback widgets, or noise
-      if (rawText.length < 50) continue
+      if (rawText.length < 40) continue
       if (
         rawText.includes('Are these results helpful?') ||
         rawText.includes('Your feedback helps us improve') ||
@@ -95,30 +142,39 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
       const allAnchors = Array.from(card.querySelectorAll('a'))
 
       // Also extract mailto links from anchors if present
-      let mailtoEmail = ''
+      const mailtoEmails = []
       for (const a of allAnchors) {
         const h = a.href || ''
         if (h.toLowerCase().startsWith('mailto:')) {
-          mailtoEmail = h.replace(/^mailto:/i, '').split('?')[0].trim()
-          break
+          const email = h.replace(/^mailto:/i, '').split('?')[0].trim()
+          if (email) mailtoEmails.push(email)
         }
       }
 
-      // Find post URN or permalink
+      // Find post URN or permalink (check card itself and nested URN attributes)
       let postUrl = ''
-      const urn = card.getAttribute('data-urn') || card.getAttribute('data-id') || card.getAttribute('data-chameleon-result-urn') || ''
+      const urnNode = card.hasAttribute('data-urn') || card.hasAttribute('data-id') || card.hasAttribute('data-chameleon-result-urn')
+        ? card
+        : card.querySelector('[data-urn*="urn:li:"], [data-id*="urn:li:"], [data-chameleon-result-urn*="urn:li:"]')
+      const urn = urnNode
+        ? (urnNode.getAttribute('data-urn') || urnNode.getAttribute('data-id') || urnNode.getAttribute('data-chameleon-result-urn') || '')
+        : ''
+
       if (urn.includes('urn:li:activity:')) {
-        const activityId = urn.split('urn:li:activity:')[1].split(':')[0]
-        postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityId}/`
+        const activityId = urn.split('urn:li:activity:')[1].split(':')[0].replace(/[^0-9]/g, '')
+        if (activityId) postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${activityId}/`
       } else if (urn.includes('urn:li:share:')) {
-        const shareId = urn.split('urn:li:share:')[1].split(':')[0]
-        postUrl = `https://www.linkedin.com/feed/update/urn:li:share:${shareId}/`
+        const shareId = urn.split('urn:li:share:')[1].split(':')[0].replace(/[^0-9]/g, '')
+        if (shareId) postUrl = `https://www.linkedin.com/feed/update/urn:li:share:${shareId}/`
+      } else if (urn.includes('urn:li:ugcPost:')) {
+        const ugcId = urn.split('urn:li:ugcPost:')[1].split(':')[0].replace(/[^0-9]/g, '')
+        if (ugcId) postUrl = `https://www.linkedin.com/feed/update/urn:li:ugcPost:${ugcId}/`
       }
 
       if (!postUrl) {
         for (const a of allAnchors) {
           const h = a.href || ''
-          if (h.includes('/feed/update/urn:li:activity:') || h.includes('/feed/update/urn:li:share:')) {
+          if (h.includes('/feed/update/urn:li:activity:') || h.includes('/feed/update/urn:li:share:') || h.includes('/feed/update/urn:li:ugcPost:')) {
             postUrl = h.split('?')[0]
             break
           }
@@ -174,24 +230,34 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
         }
       }
 
-      // Clean post text
-      let postText = rawText
+      // Prefer clean post body text if available, fallback to rawText
+      const bodyEl = card.querySelector(
+        '.feed-shared-update-v2__description, .update-components-text, [data-testid="expandable-text-box"]'
+      )
+      let postText = bodyEl ? (bodyEl.innerText || '').trim() : rawText
+      if (postText.length < 30) {
+        postText = rawText
+      }
       if (postText.startsWith('Feed post')) {
         postText = postText.replace(/^Feed post\s*/i, '')
       }
-      if (mailtoEmail && !postText.includes(mailtoEmail)) {
-        postText += `\nEmail: ${mailtoEmail}`
+      for (const email of mailtoEmails) {
+        if (!postText.toLowerCase().includes(email.toLowerCase())) {
+          postText += `\nEmail: ${email}`
+        }
       }
 
-      // Generate clean unique URL if no direct permalink found
+      // Generate stable content-based URL if no direct permalink found (independent of DOM scroll index)
       if (!postUrl) {
         let hash = 0
-        const str = `${authorName}-${postText.slice(0, 140)}`
+        const str = `${authorName}-${postText.slice(0, 160)}`
         for (let i = 0; i < str.length; i++) {
           hash = ((hash << 5) - hash) + str.charCodeAt(i)
           hash |= 0
         }
-        postUrl = `https://www.linkedin.com/feed/post/${Math.abs(hash).toString(36)}-${index}/`
+        postUrl = authorUrl
+          ? `${authorUrl}#post-${Math.abs(hash).toString(36)}`
+          : `https://www.linkedin.com/feed/post/${Math.abs(hash).toString(36)}/`
       }
 
       results.push({

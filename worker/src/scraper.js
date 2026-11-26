@@ -33,9 +33,10 @@ export async function scrapeLinkedInPosts({
   query,
   timeFilter = '24h',
   sortBy = 'relevance',
-  maxPosts = 60,
+  maxPosts = 500,
   userDataDir = './user_data',
   guardrails,
+  onProgress,
 }) {
   const resolvedUserDataDir = path.resolve(userDataDir)
   const targetUrl = buildLinkedInSearchUrl({ query, timeFilter, sortBy })
@@ -101,10 +102,13 @@ export async function scrapeLinkedInPosts({
       }
     }
 
-    // Scroll loop with randomized human-like delays
+    // Scroll loop with randomized human-like delays until end of list
     let previousCount = 0
     let noNewContentRounds = 0
-    const maxScrolls = 80
+    const maxScrolls = 250
+
+    // Move mouse into main feed viewport so wheel events always scroll the feed
+    await page.mouse.move(640, 450).catch(() => {})
 
     for (let scroll = 0; scroll < maxScrolls; scroll++) {
       // Check auth wall or checkpoint before each action
@@ -118,20 +122,23 @@ export async function scrapeLinkedInPosts({
       }
 
       // Check for and click LinkedIn "Show more results" / "See more results" button
+      let clickedShowMore = false
       try {
         const showMoreBtn = page.locator(
           'button.scaffold-finite-scroll__load-button, button:has-text("Show more results"), button:has-text("See more results"), button:has-text("Load more")'
         ).first()
         if (await showMoreBtn.isVisible().catch(() => false)) {
           console.log('[Worker] Clicking "Show more results" button to continue scrolling feed...')
-          await showMoreBtn.click({ timeout: 1500 }).catch(() => {})
-          await randomDelay(1800, 3000)
+          await showMoreBtn.scrollIntoViewIfNeeded().catch(() => {})
+          await showMoreBtn.click({ timeout: 2500 }).catch(() => {})
+          clickedShowMore = true
+          await randomDelay(2000, 3200)
         }
       } catch {
         // Non-fatal
       }
 
-      // Extract newly visible posts
+      // Extract newly visible posts in order
       const batch = await extractPostsFromPage(page, seenUrls)
       for (const p of batch) {
         extractedPosts.push(p)
@@ -140,15 +147,25 @@ export async function scrapeLinkedInPosts({
         }
       }
 
+      console.log(`[Worker] Scroll #${scroll + 1}: +${batch.length} new posts (total: ${extractedPosts.length})`)
+      if (typeof onProgress === 'function') {
+        onProgress({
+          scroll: scroll + 1,
+          extractedCount: extractedPosts.length,
+          message: `Scroll #${scroll + 1}: found ${extractedPosts.length} posts so far...`,
+        })
+      }
+
       if (extractedPosts.length >= maxPosts) {
+        console.log(`[Worker] Reached maxPosts limit (${maxPosts}). Stopping scroll.`)
         break
       }
 
-      if (extractedPosts.length === previousCount) {
+      if (extractedPosts.length === previousCount && !clickedShowMore) {
         noNewContentRounds++
-        if (noNewContentRounds >= 5) {
+        if (noNewContentRounds >= 6) {
           // Reached bottom of search results or no more content
-          console.log(`[Worker] Reached bottom of search feed or end of results after ${scroll + 1} scrolls. Total extracted: ${extractedPosts.length}`)
+          console.log(`[Worker] Reached end of search feed after ${scroll + 1} scrolls. Total extracted: ${extractedPosts.length}`)
           break
         }
       } else {
@@ -156,15 +173,29 @@ export async function scrapeLinkedInPosts({
         previousCount = extractedPosts.length
       }
 
-      // Human-like smooth scroll down + DOM scroll
+      // Scroll down both window and any scrollable main/feed container so lazy loading always triggers
       await page.evaluate(() => {
-        window.scrollBy({ top: 900, left: 0, behavior: 'smooth' })
+        const step = 750
+        window.scrollBy({ top: step, left: 0, behavior: 'smooth' })
+        if (document.scrollingElement) {
+          document.scrollingElement.scrollTop += step
+        }
+        const containers = document.querySelectorAll('main, .scaffold-layout__main, [data-testid="lazy-column"]')
+        for (const c of containers) {
+          if (c.scrollHeight > c.clientHeight + 20) {
+            c.scrollTop += step
+          }
+        }
       }).catch(() => {})
-      const scrollDistance = Math.floor(Math.random() * 400) + 400
-      await page.mouse.wheel(0, scrollDistance).catch(() => {})
 
-      // Randomized human delay: 1.2s - 2.5s
-      await randomDelay(1200, 2500)
+      await page.mouse.wheel(0, 450).catch(() => {})
+      if (noNewContentRounds >= 2) {
+        // Nudge with PageDown when waiting on lazy loader
+        await page.keyboard.press('PageDown').catch(() => {})
+      }
+
+      // Allow LinkedIn lazy-loader enough time to fetch next batch
+      await randomDelay(1500, 2600)
     }
 
     return {

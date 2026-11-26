@@ -206,12 +206,13 @@ func (h *OutreachHandler) GenerateOutreach(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Idempotency: If an outreach draft already exists for this PostID, return it directly to avoid duplicate drafts
-	if payload.PostID != "" && h.outreachStore != nil {
+	// Idempotency: If an outreach draft already exists for this PostID or ContactID (same email), return it directly
+	if h.outreachStore != nil && (payload.PostID != "" || payload.ContactID != "") {
 		allOutreach, err := h.outreachStore.ListOutreach(r.Context(), model.OutreachFilter{Limit: 500})
 		if err == nil {
 			for _, o := range allOutreach {
-				if o.PostID == payload.PostID {
+				if (payload.PostID != "" && o.PostID == payload.PostID) ||
+					(payload.ContactID != "" && o.ContactID == payload.ContactID && o.Kind == model.OutreachKindInitial) {
 					writeJSON(w, http.StatusOK, o)
 					return
 				}
@@ -299,4 +300,43 @@ func (h *OutreachHandler) GenerateOutreach(w http.ResponseWriter, r *http.Reques
 	}
 
 	writeJSON(w, http.StatusOK, outreach)
+}
+
+// QueueClearer is an optional store interface for clearing all queued/approved outreach items.
+type QueueClearer interface {
+	ClearQueue(ctx context.Context) (int64, error)
+}
+
+// ClearQueue handles DELETE /api/outreach/queue to cancel and empty the entire outreach queue.
+func (h *OutreachHandler) ClearQueue(w http.ResponseWriter, r *http.Request) {
+	if h.outreachStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"cleared": 0})
+		return
+	}
+
+	if clearer, ok := h.outreachStore.(QueueClearer); ok {
+		count, err := clearer.ClearQueue(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cleared": count, "message": "queue emptied successfully"})
+		return
+	}
+
+	// Fallback if store only implements base OutreachStore
+	items, err := h.outreachStore.ListOutreach(r.Context(), model.OutreachFilter{Limit: 500})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	var cleared int64
+	for _, it := range items {
+		if it.Status == model.OutreachStatusQueued || it.Status == model.OutreachStatusApproved {
+			if err := h.outreachStore.UpdateStatus(r.Context(), it.ID, model.OutreachStatusSkipped, "", "", "cancelled from queue", nil); err == nil {
+				cleared++
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cleared": cleared, "message": "queue emptied successfully"})
 }

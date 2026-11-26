@@ -251,7 +251,7 @@ func (r *OutreachRepository) HasExistingInitialOutreach(ctx context.Context, con
 			SELECT 1 FROM outreach
 			WHERE contact_id = $1::uuid
 			  AND kind = 'initial'
-			  AND status IN ('queued', 'sent', 'replied')
+			  AND status IN ('draft', 'approved', 'queued', 'sent', 'replied')
 			  AND ($2::text IS NULL OR $2 = '' OR id != $2::uuid)
 		)
 	`
@@ -567,4 +567,17 @@ func (r *OutreachRepository) CountFollowupsForContact(ctx context.Context, conta
 	var count int
 	err := r.pool.QueryRow(ctx, query, contactID).Scan(&count)
 	return count, err
+}
+
+// ClearQueue removes all approved and queued outreach items from the active queue.
+func (r *OutreachRepository) ClearQueue(ctx context.Context) (int64, error) {
+	if r.pool == nil {
+		return 0, errors.New("database pool is not initialized")
+	}
+
+	tag, err := r.pool.Exec(ctx, `DELETE FROM outreach WHERE status IN ('approved', 'queued')`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to clear queue: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

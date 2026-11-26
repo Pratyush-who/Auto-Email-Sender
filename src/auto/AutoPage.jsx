@@ -53,13 +53,15 @@ export default function AutoPage() {
   const [authStatus, setAuthStatus] = useState({ connected: false, email: '' })
   const [toast, setToast] = useState('')
 
-  // Multiselect state for Drafts
+  // Multiselect state for Drafts and Queue
   const [selectedDraftIds, setSelectedDraftIds] = useState([])
+  const [selectedQueueIds, setSelectedQueueIds] = useState([])
   const [editingDraftId, setEditingDraftId] = useState(null)
   const [draftEditValues, setDraftEditValues] = useState({ subject: '', body: '' })
   const [renderTimestamp, setRenderTimestamp] = useState(() => Date.now())
   const [selectedRun, setSelectedRun] = useState(null)
   const [actionLoadingId, setActionLoadingId] = useState(null)
+  const [scrapeProgress, setScrapeProgress] = useState(null)
 
   const showToast = (msg) => {
     setToast(msg)
@@ -175,18 +177,25 @@ export default function AutoPage() {
     const pollerInterval = setInterval(() => {
       api.getDashboardSummary().then((sumData) => {
         if (!ignore && sumData) {
-          setSummary((prev) => ({
-            ...prev,
-            auto_enabled: sumData.auto_enabled ?? sumData.autoEnabled ?? false,
-            state: sumData.state || sumData.status || 'IDLE',
-            armed: Boolean(sumData.armed),
-            daily_sent: sumData.daily_sent ?? sumData.dailySent ?? prev.daily_sent,
-            daily_cap: sumData.daily_cap ?? sumData.dailyCap ?? prev.daily_cap,
-            last_run_at: sumData.last_run_at || sumData.lastRunAt || prev.last_run_at,
-          }))
+          const nextState = sumData.state || sumData.status || 'IDLE'
+          setSummary((prev) => {
+            if ((prev.state === 'RUNNING' || prev.state === 'SEARCHING') && nextState === 'IDLE') {
+              // Background or pre-refresh run just finished — reload posts, drafts, and runs
+              setTimeout(() => loadAllData(), 50)
+            }
+            return {
+              ...prev,
+              auto_enabled: sumData.auto_enabled ?? sumData.autoEnabled ?? false,
+              state: nextState,
+              armed: Boolean(sumData.armed),
+              daily_sent: sumData.daily_sent ?? sumData.dailySent ?? prev.daily_sent,
+              daily_cap: sumData.daily_cap ?? sumData.dailyCap ?? prev.daily_cap,
+              last_run_at: sumData.last_run_at || sumData.lastRunAt || prev.last_run_at,
+            }
+          })
         }
       }).catch(() => {})
-    }, 10000)
+    }, 4000)
 
     return () => {
       ignore = true
@@ -204,6 +213,28 @@ export default function AutoPage() {
 
     return () => clearInterval(timer)
   }, [summary.auto_enabled, summary.armed])
+
+  // Live worker progress poller while scraping is active
+  useEffect(() => {
+    if (!isRunning && summary.state !== 'RUNNING' && summary.state !== 'SEARCHING') {
+      setScrapeProgress(null)
+      return
+    }
+
+    let cancelled = false
+    const pollProgress = async () => {
+      const status = await api.getWorkerProgress()
+      if (!cancelled && status?.progress) {
+        setScrapeProgress(status.progress)
+      }
+    }
+    pollProgress()
+    const iv = setInterval(pollProgress, 1500)
+    return () => {
+      cancelled = true
+      clearInterval(iv)
+    }
+  }, [isRunning, summary.state])
 
   // Toggle Auto Scheduler
   const handleToggleAuto = async () => {
@@ -261,7 +292,7 @@ export default function AutoPage() {
         ...prev,
         state: 'RUNNING',
       }))
-      const res = await api.triggerRun({ query: trimmedQuery, timeFilter, sortBy })
+      const res = await api.triggerRun({ query: trimmedQuery, timeFilter, sortBy, maxPosts: 500 })
       setRenderTimestamp(Date.now())
 
       if (res?.error || (res?.run && res.run.status === 'failed')) {
@@ -270,7 +301,7 @@ export default function AutoPage() {
         if (res.run) setSelectedRun(res.run)
       } else {
         const stats = res?.run?.stats || {}
-        showToast(`✓ Run completed for "${trimmedQuery}" — Found: ${stats.found ?? 0}, Drafted: ${stats.drafted ?? 0}`)
+        showToast(`✓ Processed ${stats.found ?? 0} posts for "${trimmedQuery}" • Verified: ${stats.verified ?? 0} • Drafted: ${stats.drafted ?? 0} • Skipped: ${stats.skipped ?? 0}`)
         if (res.run) setSelectedRun(res.run)
       }
 
@@ -397,6 +428,92 @@ export default function AutoPage() {
       }
     } catch (err) {
       showToast(`Bulk send error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  // Queue Multiselect Handlers
+  const handleSelectQueue = (id) => {
+    setSelectedQueueIds((prev) =>
+      prev.includes(id) ? prev.filter((qId) => qId !== id) : [...prev, id]
+    )
+  }
+
+  const handleSelectAllQueue = () => {
+    if (selectedQueueIds.length === queue.length) {
+      setSelectedQueueIds([])
+    } else {
+      setSelectedQueueIds(queue.map((q) => q.id))
+    }
+  }
+
+  const handleBulkSendQueue = async () => {
+    if (selectedQueueIds.length === 0) return
+    const count = selectedQueueIds.length
+    setActionLoadingId('bulk_send_queue')
+    showToast(`Sending ${count} queued emails now via Gmail...`)
+    try {
+      const res = await api.bulkSendOutreach(selectedQueueIds)
+      setSelectedQueueIds([])
+      await loadAllData()
+      if (res?.sent) {
+        showToast(`✓ Successfully dispatched ${count} queued emails!`)
+      } else if (res?.reason) {
+        showToast(`⚠️ Send notice: ${res.reason}`)
+      } else {
+        showToast(`Dispatched ${count} queued emails`)
+      }
+    } catch (err) {
+      showToast(`Queue bulk send error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  const handleCancelQueuedSingle = async (id) => {
+    setActionLoadingId('cancel_queue_' + id)
+    try {
+      await api.skipOutreach(id)
+      setSelectedQueueIds((prev) => prev.filter((qId) => qId !== id))
+      await loadAllData()
+      showToast('✕ Removed email from queue')
+    } catch (err) {
+      showToast(`Cancel error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  const handleBulkCancelQueue = async () => {
+    if (selectedQueueIds.length === 0) return
+    const count = selectedQueueIds.length
+    setActionLoadingId('bulk_cancel_queue')
+    try {
+      await api.bulkSkipOutreach(selectedQueueIds)
+      setSelectedQueueIds([])
+      await loadAllData()
+      showToast(`✕ Cancelled ${count} queued email${count > 1 ? 's' : ''}`)
+    } catch (err) {
+      showToast(`Bulk cancel error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  const handleEmptyQueue = async () => {
+    if (queue.length === 0) return
+    if (!window.confirm(`Are you sure you want to cancel and empty all ${queue.length} queued emails?`)) {
+      return
+    }
+    setActionLoadingId('empty_queue')
+    try {
+      await api.clearQueue()
+      setSelectedQueueIds([])
+      await loadAllData()
+      showToast('✓ Outreach queue emptied!')
+    } catch (err) {
+      showToast(`Empty queue error: ${err.message}`)
     } finally {
       setActionLoadingId(null)
     }
@@ -687,11 +804,18 @@ export default function AutoPage() {
         <section className="active-run-banner">
           <div className="active-run-spinner" />
           <div style={{ flex: 1 }}>
-            <h3 style={{ margin: 0, color: '#93c5fd', fontSize: '1.02rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              ⚡ Scraper & Pipeline Active: Querying "{query}"
+            <h3 style={{ margin: 0, color: '#93c5fd', fontSize: '1.02rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+              ⚡ Scraper & Pipeline Active: Querying "{query || scrapeProgress?.query}"
+              {scrapeProgress?.active && (
+                <span className="pill pill-armed" style={{ fontSize: '0.78rem', padding: '0.15rem 0.55rem' }}>
+                  Scroll #{scrapeProgress.scrolls} • {scrapeProgress.extractedCount} posts found
+                </span>
+              )}
             </h3>
             <p className="muted" style={{ margin: '0.25rem 0 0 0', fontSize: '0.84rem' }}>
-              Playwright Chrome is actively scraping LinkedIn for latest opportunities, verifying domains, and generating drafts...
+              {scrapeProgress?.active && scrapeProgress?.message
+                ? scrapeProgress.message
+                : 'Playwright Chrome is actively scraping LinkedIn for latest opportunities, verifying domains, and generating drafts...'}
             </p>
           </div>
           <button
@@ -763,7 +887,16 @@ export default function AutoPage() {
       {activeTab === 'posts' && (
         <section className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-            <h2 style={{ margin: 0 }}>Discovered Opportunities ({posts.length})</h2>
+            <div>
+              <h2 style={{ margin: 0 }}>Discovered Opportunities ({posts.length})</h2>
+              {posts.length > 0 && (
+                <p className="muted" style={{ margin: '0.25rem 0 0 0', fontSize: '0.84rem' }}>
+                  {posts.filter((p) => p.extracted?.emails?.length > 0).length} with Email •{' '}
+                  {posts.filter((p) => p.extracted?.phones?.length > 0).length} with Phone •{' '}
+                  {posts.filter((p) => p.extracted?.apply_via_dm).length} DM/Message Directly
+                </p>
+              )}
+            </div>
             {posts.length > 0 && (
               <button
                 type="button"
@@ -780,13 +913,16 @@ export default function AutoPage() {
           {posts.length === 0 ? (
             <p className="muted">No posts discovered yet. Trigger a run above or enable Autopilot.</p>
           ) : (
-            posts.map((post) => (
+            posts.map((post, postIdx) => (
               <div key={post.id} className="item-card">
                 <div className="item-card-header">
                   <div>
-                    <h3 style={{ margin: 0, fontSize: '1.05rem' }}>{post.role}</h3>
+                    <h3 style={{ margin: 0, fontSize: '1.05rem' }}>
+                      <span className="muted" style={{ fontSize: '0.82rem', marginRight: '0.45rem' }}>#{postIdx + 1}</span>
+                      {post.role || 'Software Developer'}
+                    </h3>
                     <p className="muted" style={{ fontSize: '0.88rem' }}>
-                      <strong>{post.company}</strong> • posted by {post.author} • {new Date(post.found_at).toLocaleDateString()}
+                      <strong>{post.company || 'Company'}</strong> • posted by {post.author} • {new Date(post.found_at).toLocaleDateString()}
                     </p>
                   </div>
                   <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
@@ -809,7 +945,27 @@ export default function AutoPage() {
                     <strong>⚠️ Potential Spam or Fake Job Flagged:</strong> {post.extracted?.suspicion_reason || post.skip_reason}
                   </div>
                 )}
-                <div style={{ display: 'flex', gap: '1rem', fontSize: '0.85rem', flexWrap: 'wrap' }} className="muted">
+                {post.text && (
+                  <p
+                    style={{
+                      margin: '0.45rem 0 0.55rem 0',
+                      fontSize: '0.84rem',
+                      color: '#d4d4d8',
+                      lineHeight: 1.4,
+                      display: '-webkit-box',
+                      WebkitLineClamp: 2,
+                      WebkitBoxOrient: 'vertical',
+                      overflow: 'hidden',
+                      borderLeft: '2px solid #3f3f46',
+                      paddingLeft: '0.6rem',
+                    }}
+                    title={post.text}
+                  >
+                    {post.text}
+                  </p>
+                )}
+
+                <div style={{ display: 'flex', gap: '1rem', fontSize: '0.85rem', flexWrap: 'wrap', alignItems: 'center' }} className="muted">
                   <span>Location: <strong>{post.location || 'Not specified'}</strong></span>
                   {post.extracted?.stipend ? (
                     <span>Stipend: <strong>₹{post.extracted.stipend.toLocaleString()}/mo</strong></span>
@@ -817,9 +973,21 @@ export default function AutoPage() {
                   {post.extracted?.experience_years != null ? (
                     <span>Exp: <strong>{post.extracted.experience_years} yrs</strong></span>
                   ) : null}
-                  <a href={post.url} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa' }}>
+                  <a href={post.url} target="_blank" rel="noopener noreferrer" style={{ color: '#60a5fa', fontWeight: 600 }}>
                     View LinkedIn Post ↗
                   </a>
+                  {post.extracted?.apply_via_dm && (
+                    <a
+                      href={post.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="tag tag-remote"
+                      style={{ textDecoration: 'none', color: '#c4b5fd', borderColor: '#8b5cf6' }}
+                      title="Post asks to message / DM directly on LinkedIn"
+                    >
+                      💬 DM / Message Directly ↗
+                    </a>
+                  )}
                 </div>
 
                 {post.extracted?.emails && post.extracted.emails.length > 0 && (
@@ -976,7 +1144,7 @@ export default function AutoPage() {
                   onClick={handleBulkApprove}
                   disabled={Boolean(actionLoadingId)}
                 >
-                  {actionLoadingId === 'bulk_approve' ? '⏳ Approving...' : `✓ Approve Selected (${selectedDraftIds.length})`}
+                  {actionLoadingId === 'bulk_approve' ? '⏳ Scheduling...' : `✓ Approve & Schedule (${selectedDraftIds.length})`}
                 </button>
                 <button
                   type="button"
@@ -984,7 +1152,7 @@ export default function AutoPage() {
                   onClick={handleBulkSendNow}
                   disabled={Boolean(actionLoadingId)}
                 >
-                  {actionLoadingId === 'bulk_send' ? '⏳ Sending...' : `✈ Send Selected Now (${selectedDraftIds.length})`}
+                  {actionLoadingId === 'bulk_send' ? '⏳ Sending...' : `✈ Send Now (${selectedDraftIds.length})`}
                 </button>
                 <button
                   type="button"
@@ -1150,19 +1318,100 @@ export default function AutoPage() {
             </div>
           )}
 
-          <h2>Outreach Queue ({queue.length})</h2>
-          <p className="muted">Approved emails scheduled to send within your daily window respecting time gaps.</p>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.8rem' }}>
+            <div>
+              <h2 style={{ margin: 0 }}>Outreach Queue ({queue.length})</h2>
+              <p className="muted" style={{ margin: '0.2rem 0 0 0', fontSize: '0.88rem' }}>
+                Approved emails scheduled to send within your daily window respecting time gaps.
+              </p>
+            </div>
+            {queue.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', flexWrap: 'wrap' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontWeight: 600 }}>
+                  <input
+                    type="checkbox"
+                    style={{ width: 'auto' }}
+                    checked={queue.length > 0 && selectedQueueIds.length === queue.length}
+                    onChange={handleSelectAllQueue}
+                  />
+                  Select All ({queue.length})
+                </label>
+                <button
+                  type="button"
+                  className="btn btn-kill"
+                  onClick={handleEmptyQueue}
+                  disabled={Boolean(actionLoadingId)}
+                  style={{ padding: '0.35rem 0.85rem', fontSize: '0.82rem', whiteSpace: 'nowrap' }}
+                  title="Cancel and remove all emails from the queue"
+                >
+                  {actionLoadingId === 'empty_queue' ? '⏳ Emptying...' : `🗑 Empty Queue (${queue.length})`}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {selectedQueueIds.length > 0 && (
+            <div className="bulk-toolbar">
+              <span style={{ fontWeight: 700, color: '#60a5fa' }}>
+                ✓ {selectedQueueIds.length} queued email{selectedQueueIds.length > 1 ? 's' : ''} selected
+              </span>
+              <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn-send-now"
+                  onClick={handleBulkSendQueue}
+                  disabled={Boolean(actionLoadingId)}
+                >
+                  {actionLoadingId === 'bulk_send_queue' ? '⏳ Sending...' : `✈ Send Selected Now (${selectedQueueIds.length})`}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={handleBulkCancelQueue}
+                  disabled={Boolean(actionLoadingId)}
+                >
+                  {actionLoadingId === 'bulk_cancel_queue' ? '⏳ Cancelling...' : `✕ Cancel Selected (${selectedQueueIds.length})`}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setSelectedQueueIds([])}
+                  style={{ fontSize: '0.8rem' }}
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+          )}
+
           {queue.length === 0 ? (
-            <p className="muted">Queue is currently empty.</p>
+            <p className="muted" style={{ marginTop: '1rem' }}>Queue is currently empty.</p>
           ) : (
-            queue.map((q) => (
-              <div key={q.id} className="item-card">
+            queue.map((q) => {
+              const isSelected = selectedQueueIds.includes(q.id)
+              return (
+              <div
+                key={q.id}
+                className="item-card"
+                style={{
+                  borderColor: isSelected ? '#3b82f6' : 'var(--line-1)',
+                  background: isSelected ? 'rgba(59, 130, 246, 0.04)' : '#0c0c0c',
+                }}
+              >
                 <div className="item-card-header">
-                  <div>
-                    <h3 style={{ margin: 0 }}>{q.subject}</h3>
-                    <p className="muted" style={{ fontSize: '0.85rem' }}>
-                      To: <strong>{q.contact_email}</strong> • {q.company}
-                    </p>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.8rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => handleSelectQueue(q.id)}
+                      style={{ marginTop: '0.3rem', width: 'auto', cursor: 'pointer' }}
+                    />
+                    <div>
+                      <h3 style={{ margin: 0 }}>{q.subject}</h3>
+                      <p className="muted" style={{ fontSize: '0.85rem', marginTop: '0.2rem' }}>
+                        To: <strong>{q.contact_email}</strong> • {q.company}
+                      </p>
+                    </div>
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                     {q.scheduled_at ? (
@@ -1182,11 +1431,22 @@ export default function AutoPage() {
                     >
                       {actionLoadingId === 'send_' + q.id ? '⏳ Sending...' : '✈ Send Now'}
                     </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => handleCancelQueuedSingle(q.id)}
+                      disabled={Boolean(actionLoadingId)}
+                      title="Cancel and remove from queue"
+                      style={{ fontSize: '0.8rem', padding: '0.35rem 0.65rem' }}
+                    >
+                      {actionLoadingId === 'cancel_queue_' + q.id ? '⏳...' : '✕ Cancel'}
+                    </button>
                   </div>
                 </div>
                 <div className="email-preview-box">{q.body}</div>
               </div>
-            ))
+              )
+            })
           )}
         </section>
       )}

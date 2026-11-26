@@ -12,6 +12,7 @@ type PostExtracted struct {
 	Phones              []string       `json:"phones,omitempty"`
 	RequiredSubjectLine string         `json:"required_subject_line,omitempty"`
 	ApplyInstructions   string         `json:"apply_instructions,omitempty"`
+	ApplyViaDM          bool           `json:"apply_via_dm,omitempty"`
 	CompanySummary      string         `json:"company_summary,omitempty"`
 	IsSuspicious        bool           `json:"is_suspicious,omitempty"`
 	SuspicionReason     string         `json:"suspicion_reason,omitempty"`
