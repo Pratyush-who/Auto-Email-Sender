@@ -121,10 +121,8 @@ CANDIDATE INFORMATION:
 
 REQUIRED EMAIL STRUCTURE:
 1. Greeting: "Hello," or "Hello <FirstName>," (if recruiter name is known from post).
-2. Direct intro sentence tailored to the role ("%s"):
-   - If Flutter / Mobile: "I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience in building and deploying responsive apps using REST APIs, clean code, and proper state management."
-   - If Go / Golang / Backend: "I'm Pratyush Mehra, a Go / Backend developer with 2+ years of experience in building and deploying high-throughput services using REST APIs, clean code, and proper system architecture."
-   - If React / Frontend / Full Stack: "I'm Pratyush Mehra, a Full Stack / Frontend developer with 2+ years of experience in building and deploying responsive applications using REST APIs, clean code, and proper state management."
+2. High-impact personalized intro sentence (1-2 sentences max) tailored BOTH to the role ("%s") AND specifically to %s's product/domain from the post:
+   - Start with "I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience..." (or "Go / Backend developer" for backend, "Full Stack / Frontend developer" for web) AND directly connect it to %s's specific product, problem, or opening (e.g. "...building high-scale apps — really excited about what %s is doing in [domain/product] and would love to contribute to your mobile engineering team."). Do NOT use a generic copy-paste opener.
 3. 3-4 authentic bullet points tailored to %s and the job requirements:
    • Focus on clean UI, scalable architecture, and writing production ready code (tailor slightly to match their stack or architecture)
    • Worked on large userbase apps with over 100k+ downloads and deployed apps from scratch (mention relevance to their product/domain if applicable)
@@ -149,7 +147,7 @@ RULES:
 
 Return JSON with "subject" and "body".`,
 			company, role, role, company, post.WorkMode, post.Location,
-			post.Text, companySummary, role, company, company,
+			post.Text, companySummary, role, company, company, company, company, company,
 			locationRule, requiredSubjectNotice, similarityWarning, company,
 		)
 
@@ -242,10 +240,8 @@ CANDIDATE INFORMATION:
 
 REQUIRED EMAIL STRUCTURE FOR EACH:
 1. Greeting: "Hello," or "Hello <FirstName>," (if recruiter name is known).
-2. Tailored intro sentence:
-   - Flutter / Mobile: "I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience in building and deploying responsive apps using REST APIs, clean code, and proper state management."
-   - Go / Backend: "I'm Pratyush Mehra, a Go / Backend developer with 2+ years of experience in building and deploying high-performance services using REST APIs, clean code, and scalable architecture."
-   - Full Stack / Frontend: "I'm Pratyush Mehra, a Full Stack / Frontend developer with 2+ years of experience in building and deploying responsive applications using REST APIs, clean code, and proper state management."
+2. High-impact personalized intro sentence tailored BOTH to the role AND specifically to that company's product/domain:
+   - Start with "I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience..." (or "Go / Backend developer" for Go/backend, "Full Stack / Frontend developer" for web) AND directly reference that company's name and what they are building from the post so it immediately hooks the recruiter. Do NOT use an identical static opener across companies.
 3. 3-4 crisp bullet points tailored to that specific company & post requirements:
    • Focus on clean UI, scalable architecture, and writing production ready code
    • Worked on large userbase apps with over 100k+ downloads and deployed apps from scratch
@@ -352,20 +348,20 @@ func (c *Composer) fallbackDraft(profile model.Profile, post model.Post) *Compos
 	lowerRole := strings.ToLower(role)
 	lowerPost := strings.ToLower(post.Text)
 
-	introLine := "I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience in building and deploying responsive apps using REST APIs, clean code, and proper state management."
-	stackBullet := "• With my experience and hands on knowledge different tech stack, like Spring boot and GoLang along with knowledge of system design concepts."
-
-	if strings.Contains(lowerRole, "golang") || strings.Contains(lowerRole, "go ") || strings.Contains(lowerRole, "backend") || strings.Contains(lowerPost, "golang") {
-		introLine = "I'm Pratyush Mehra, a Go / Backend developer with 2+ years of experience in building and deploying high-performance services using REST APIs, clean code, and scalable architecture."
-		stackBullet = "• With my experience and hands on knowledge different tech stack, like GoLang, Spring boot and Flutter along with knowledge of system design concepts."
-	} else if strings.Contains(lowerRole, "react") || strings.Contains(lowerRole, "frontend") || strings.Contains(lowerRole, "web") {
-		introLine = "I'm Pratyush Mehra, a Full Stack / Frontend developer with 2+ years of experience in building and deploying responsive web & mobile apps using REST APIs, clean code, and modern state management."
-		stackBullet = "• With my experience and hands on knowledge different tech stack, like React, GoLang and Flutter along with knowledge of system design concepts."
-	}
-
 	companyTarget := company
 	if companyTarget == "your team" || companyTarget == "" {
 		companyTarget = "your team"
+	}
+
+	introLine := fmt.Sprintf("I'm Pratyush Mehra, a Flutter app dev with 2+ years of experience building and deploying responsive apps using REST APIs, clean code, and proper state management — saw %s's %s opening and would love to help ship reliable mobile experiences for your team.", companyTarget, role)
+	stackBullet := "• With my experience and hands on knowledge different tech stack, like Spring boot and GoLang along with knowledge of system design concepts."
+
+	if strings.Contains(lowerRole, "golang") || strings.Contains(lowerRole, "go ") || strings.Contains(lowerRole, "backend") || strings.Contains(lowerPost, "golang") {
+		introLine = fmt.Sprintf("I'm Pratyush Mehra, a Go / Backend developer with 2+ years of experience building and deploying high-performance services using REST APIs, clean code, and scalable architecture — saw %s's %s opening and would love to contribute to your backend systems.", companyTarget, role)
+		stackBullet = "• With my experience and hands on knowledge different tech stack, like GoLang, Spring boot and Flutter along with knowledge of system design concepts."
+	} else if strings.Contains(lowerRole, "react") || strings.Contains(lowerRole, "frontend") || strings.Contains(lowerRole, "web") {
+		introLine = fmt.Sprintf("I'm Pratyush Mehra, a Full Stack / Frontend developer with 2+ years of experience building and deploying responsive web & mobile apps using REST APIs, clean code, and modern state management — saw %s's %s opening and would love to contribute.", companyTarget, role)
+		stackBullet = "• With my experience and hands on knowledge different tech stack, like React, GoLang and Flutter along with knowledge of system design concepts."
 	}
 
 	body := fmt.Sprintf(

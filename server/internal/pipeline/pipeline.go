@@ -183,12 +183,10 @@ func (p *Pipeline) processPostInternal(ctx context.Context, post *model.Post, se
 	}
 
 	// Step 5: Apply filter rules against settings.
-	// When manual approval mode is enabled, do not drop onsite or unknown-paid posts so user can review & decide in Approvals.
+	// Always allow onsite/hybrid/remote and treat unmentioned stipend as paid (skip only if explicitly unpaid).
 	effectiveSettings := settings
-	if settings.ApprovalMode {
-		effectiveSettings.WorkModes = nil
-		effectiveSettings.SkipUnknownPaid = false
-	}
+	effectiveSettings.WorkModes = nil
+	effectiveSettings.SkipUnknownPaid = false
 	passFilter, filterReason := filter.ApplyFilters(*post, effectiveSettings)
 	if !passFilter {
 		post.Status = "skipped"

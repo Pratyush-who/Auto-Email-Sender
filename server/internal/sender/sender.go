@@ -294,8 +294,16 @@ func (s *Sender) SendNext(ctx context.Context, force bool) (*SendResult, error) 
 	if s.profileStore != nil {
 		profile, err := s.profileStore.Get(ctx)
 		if err == nil && profile != nil && strings.TrimSpace(profile.ResumePath) != "" {
-			resumePath := strings.TrimSpace(profile.ResumePath)
+			resumePath := strings.ReplaceAll(strings.TrimSpace(profile.ResumePath), "\\", "/")
 			data, err := s.readFile(resumePath)
+			if err != nil {
+				altPath := filepath.Join("/app/uploads", filepath.Base(resumePath))
+				if altData, altErr := s.readFile(altPath); altErr == nil && len(altData) > 0 {
+					data = altData
+					err = nil
+					resumePath = altPath
+				}
+			}
 			if err == nil && len(data) > 0 {
 				filename := filepath.Base(resumePath)
 				if !strings.HasSuffix(strings.ToLower(filename), ".pdf") {

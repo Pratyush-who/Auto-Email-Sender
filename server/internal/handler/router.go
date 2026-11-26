@@ -106,6 +106,7 @@ func SetupRouter(deps RouterDependencies) *chi.Mux {
 		api.Post("/outreach/{id}/approve", outreachHandler.ApproveOutreach)
 		api.Post("/outreach/{id}/skip", outreachHandler.SkipOutreach)
 		api.Post("/composer/generate", outreachHandler.GenerateOutreach)
+		api.Post("/composer/generate-batch", outreachHandler.GenerateOutreachBatch)
 
 		// Sender Controls
 		api.Get("/sender/status", senderHandler.GetStatus)

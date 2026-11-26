@@ -569,13 +569,13 @@ func (r *OutreachRepository) CountFollowupsForContact(ctx context.Context, conta
 	return count, err
 }
 
-// ClearQueue removes all approved and queued outreach items from the active queue.
+// ClearQueue moves all approved and queued outreach items back to draft status so they are never lost.
 func (r *OutreachRepository) ClearQueue(ctx context.Context) (int64, error) {
 	if r.pool == nil {
 		return 0, errors.New("database pool is not initialized")
 	}
 
-	tag, err := r.pool.Exec(ctx, `DELETE FROM outreach WHERE status IN ('approved', 'queued')`)
+	tag, err := r.pool.Exec(ctx, `UPDATE outreach SET status = 'draft', scheduled_at = NULL, updated_at = NOW() WHERE status IN ('approved', 'queued')`)
 	if err != nil {
 		return 0, fmt.Errorf("failed to clear queue: %w", err)
 	}

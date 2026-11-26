@@ -41,7 +41,7 @@ func DefaultSettings() Settings {
 		SkipUnpaid:         true,
 		SkipUnknownPaid:    false,
 		TrustThreshold:     40,
-		DailyCap:           30,
+		DailyCap:           100,
 		SendWindow:         "09:00-19:00 IST",
 		GapMinMinutes:      2,
 		GapMaxMinutes:      6,

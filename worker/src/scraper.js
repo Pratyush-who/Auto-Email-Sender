@@ -45,6 +45,7 @@ export async function scrapeLinkedInPosts({
   let page = null
   const extractedPosts = []
   const seenUrls = new Set()
+  const seenFingerprints = new Set()
 
   try {
     // Launch persistent headed context so cookies and session persist across runs
@@ -139,7 +140,7 @@ export async function scrapeLinkedInPosts({
       }
 
       // Extract newly visible posts in order
-      const batch = await extractPostsFromPage(page, seenUrls)
+      const batch = await extractPostsFromPage(page, seenUrls, seenFingerprints)
       for (const p of batch) {
         extractedPosts.push(p)
         if (extractedPosts.length >= maxPosts) {

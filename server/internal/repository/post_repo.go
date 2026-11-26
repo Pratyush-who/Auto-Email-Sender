@@ -93,7 +93,7 @@ func (r *PostRepository) GetPosts(ctx context.Context, limit, offset int) ([]mod
 	query := `
 		SELECT id, url, author, text, company, role, work_mode, paid_status, location, extracted, status, skip_reason, found_at, created_at
 		FROM posts
-		ORDER BY found_at DESC
+		ORDER BY found_at DESC, created_at DESC
 		LIMIT $1 OFFSET $2
 	`
 

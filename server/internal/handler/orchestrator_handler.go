@@ -127,22 +127,29 @@ func (h *OrchestratorHandler) RunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 
-	run, err := h.orc.RunPipeline(r.Context(), "manual", payload.Query, payload.TimeFilter, payload.SortBy, payload.MaxPosts)
 	status, _ := h.orc.GetStatus(r.Context())
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"error":   err.Error(),
-			"message": err.Error(),
-			"run":     run,
+	if status != nil && status.State == "RUNNING" {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":   "a pipeline run is already in progress",
+			"message": "A scrape run is already in progress. Please wait for it to finish.",
 			"status":  status,
 		})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"message": "pipeline run initiated and engine armed for today",
-		"run":     run,
-		"status":  status,
+	// Execute scrape & pipeline asynchronously so long LinkedIn scrapes never trigger browser/proxy HTTP timeouts or retries
+	go func(q, tf, sb string, mp int) {
+		_, _ = h.orc.RunPipeline(context.Background(), "manual", q, tf, sb, mp)
+	}(payload.Query, payload.TimeFilter, payload.SortBy, payload.MaxPosts)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"started": true,
+		"message": "Scrape & pipeline started in background",
+		"status": map[string]any{
+			"state":       "RUNNING",
+			"armed":       true,
+			"auto_enabled": status != nil && status.AutoEnabled,
+		},
 	})
 }
 

@@ -125,6 +125,27 @@ func ExtractPostWithRegex(postText string) *PostExtractionResult {
 		}
 	}
 
+	// Reject job-seeker posts (#OpenToWork) that appear in hiring searches
+	jobSeekerTerms := []string{
+		"open to work", "#opentowork", "exploring new career opportunities",
+		"looking for opportunities", "seeking new opportunities", "immediate joiner",
+		"available for immediate", "refer me", "looking for my next", "i'm currently exploring",
+		"i am currently exploring", "my project experience",
+	}
+	explicitCompanyHiring := strings.Contains(lowerText, "we are hiring") ||
+		strings.Contains(lowerText, "we're hiring") ||
+		strings.Contains(lowerText, "join our team") ||
+		strings.Contains(lowerText, "send your cv") ||
+		strings.Contains(lowerText, "send your resume")
+	if !explicitCompanyHiring {
+		for _, jsTerm := range jobSeekerTerms {
+			if strings.Contains(lowerText, jsTerm) {
+				isHiring = false
+				break
+			}
+		}
+	}
+
 	workMode := "unknown"
 	if strings.Contains(lowerText, "remote") {
 		workMode = "remote"
@@ -134,16 +155,14 @@ func ExtractPostWithRegex(postText string) *PostExtractionResult {
 		workMode = "onsite"
 	}
 
-	paidStatus := "unknown"
-	unpaidIndicators := []string{"unpaid", "no stipend", "for exposure", "for experience", "volunteer"}
+	// Assume paid unless explicitly marked unpaid (even if stipend is not mentioned)
+	paidStatus := "paid"
+	unpaidIndicators := []string{"unpaid", "no stipend", "without pay", "zero stipend", "for exposure", "volunteer"}
 	for _, ind := range unpaidIndicators {
 		if strings.Contains(lowerText, ind) {
 			paidStatus = "unpaid"
 			break
 		}
-	}
-	if paidStatus != "unpaid" && (strings.Contains(lowerText, "stipend") || strings.Contains(lowerText, "salary") || strings.Contains(lowerText, "lpa") || strings.Contains(lowerText, "per month") || strings.Contains(lowerText, "k/mo")) {
-		paidStatus = "paid"
 	}
 
 	// Try extracting role from known titles

@@ -27,6 +27,7 @@ type OutreachStore interface {
 // ComposerService defines email drafting capabilities.
 type ComposerService interface {
 	Compose(ctx context.Context, profile model.Profile, post model.Post, companySummary string, existingBodiesToday []string) (*composer.ComposedEmail, error)
+	ComposeBatch(ctx context.Context, profile model.Profile, items []composer.BatchComposeItem, existingBodiesToday []string) (map[string]composer.ComposedEmail, error)
 }
 
 // OutreachHandler handles API endpoints for viewing and editing outreach emails.
@@ -199,6 +200,7 @@ func (h *OutreachHandler) GenerateOutreach(w http.ResponseWriter, r *http.Reques
 	var payload struct {
 		PostID    string `json:"post_id"`
 		ContactID string `json:"contact_id"`
+		Force     bool   `json:"force"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -206,8 +208,8 @@ func (h *OutreachHandler) GenerateOutreach(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Idempotency: If an outreach draft already exists for this PostID or ContactID (same email), return it directly
-	if h.outreachStore != nil && (payload.PostID != "" || payload.ContactID != "") {
+	// Idempotency: If an outreach draft already exists for this PostID or ContactID (same email), return it directly unless force=true (resend)
+	if !payload.Force && h.outreachStore != nil && (payload.PostID != "" || payload.ContactID != "") {
 		allOutreach, err := h.outreachStore.ListOutreach(r.Context(), model.OutreachFilter{Limit: 500})
 		if err == nil {
 			for _, o := range allOutreach {
@@ -339,4 +341,168 @@ func (h *OutreachHandler) ClearQueue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cleared": cleared, "message": "queue emptied successfully"})
+}
+
+// GenerateOutreachBatch handles POST /api/composer/generate-batch to draft multiple selected posts in batched Gemini calls.
+func (h *OutreachHandler) GenerateOutreachBatch(w http.ResponseWriter, r *http.Request) {
+	if h.composer == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "composer is not configured"})
+		return
+	}
+
+	var payload struct {
+		PostIDs []string `json:"post_ids"`
+		Force   bool     `json:"force"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+		return
+	}
+	if len(payload.PostIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "post_ids cannot be empty"})
+		return
+	}
+
+	profile, _ := h.profileStore.Get(r.Context())
+	if profile == nil {
+		profile = &model.Profile{}
+	}
+
+	posts, err := h.postStore.GetPosts(r.Context(), 500, 0)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	postByID := make(map[string]model.Post, len(posts))
+	for _, p := range posts {
+		postByID[p.ID] = p
+	}
+
+	existingOutreach, _ := h.outreachStore.ListOutreach(r.Context(), model.OutreachFilter{Limit: 500})
+	existingByPost := make(map[string]bool)
+	existingByContact := make(map[string]bool)
+	for _, o := range existingOutreach {
+		if o.PostID != "" {
+			existingByPost[o.PostID] = true
+		}
+		if o.ContactID != "" && o.Kind == model.OutreachKindInitial {
+			existingByContact[o.ContactID] = true
+		}
+	}
+
+	existingContacts, _ := h.contactStore.GetContacts(r.Context(), 500)
+	contactByEmail := make(map[string]model.Contact)
+	for _, c := range existingContacts {
+		contactByEmail[strings.ToLower(strings.TrimSpace(c.Email))] = c
+	}
+
+	type draftTarget struct {
+		item      composer.BatchComposeItem
+		contactID string
+	}
+	var targets []draftTarget
+	seenEmails := make(map[string]bool)
+	skippedDuplicates := 0
+
+	for _, pid := range payload.PostIDs {
+		p, ok := postByID[pid]
+		if !ok || len(p.Extracted.Emails) == 0 {
+			continue
+		}
+		if !payload.Force && existingByPost[p.ID] {
+			skippedDuplicates++
+			continue
+		}
+
+		primaryEmail := strings.ToLower(strings.TrimSpace(p.Extracted.Emails[0]))
+		if primaryEmail == "" || seenEmails[primaryEmail] {
+			skippedDuplicates++
+			continue
+		}
+
+		var contactID string
+		if c, found := contactByEmail[primaryEmail]; found {
+			contactID = c.ID
+		} else if h.contactStore != nil {
+			company := p.Company
+			if company == "" {
+				company = p.Role
+			}
+			domain := ""
+			if parts := strings.Split(primaryEmail, "@"); len(parts) == 2 {
+				domain = parts[1]
+			}
+			if newC, err := h.contactStore.SaveContact(r.Context(), &model.Contact{
+				Email:        primaryEmail,
+				Company:      company,
+				Domain:       domain,
+				TrustScore:   100,
+				TrustReasons: []string{"batch manually drafted"},
+				PostID:       p.ID,
+			}); err == nil && newC != nil {
+				contactID = newC.ID
+				contactByEmail[primaryEmail] = *newC
+			}
+		}
+
+		if !payload.Force && contactID != "" && existingByContact[contactID] {
+			skippedDuplicates++
+			continue
+		}
+
+		seenEmails[primaryEmail] = true
+		targets = append(targets, draftTarget{
+			item: composer.BatchComposeItem{
+				PostID:         p.ID,
+				Post:           p,
+				CompanySummary: p.Extracted.CompanySummary,
+			},
+			contactID: contactID,
+		})
+	}
+
+	var createdDrafts []model.Outreach
+	bodiesToday, _ := h.outreachStore.GetSentBodiesToday(r.Context())
+	const batchSize = 15
+
+	for start := 0; start < len(targets); start += batchSize {
+		end := start + batchSize
+		if end > len(targets) {
+			end = len(targets)
+		}
+		chunk := targets[start:end]
+		batchItems := make([]composer.BatchComposeItem, len(chunk))
+		for i, t := range chunk {
+			batchItems[i] = t.item
+		}
+
+		composedMap, compErr := h.composer.ComposeBatch(r.Context(), *profile, batchItems, bodiesToday)
+		if compErr != nil {
+			continue
+		}
+
+		for _, t := range chunk {
+			res, ok := composedMap[t.item.PostID]
+			if !ok || strings.TrimSpace(res.Body) == "" || t.contactID == "" {
+				continue
+			}
+			created, err := h.outreachStore.CreateOutreach(r.Context(), &model.Outreach{
+				ContactID: t.contactID,
+				PostID:    t.item.PostID,
+				Kind:      model.OutreachKindInitial,
+				Subject:   res.Subject,
+				Body:      res.Body,
+				Status:    model.OutreachStatusDraft,
+			})
+			if err == nil && created != nil {
+				createdDrafts = append(createdDrafts, *created)
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"drafted":            len(createdDrafts),
+		"skipped_duplicates": skippedDuplicates,
+		"drafts":             createdDrafts,
+	})
 }

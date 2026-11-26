@@ -24,9 +24,10 @@ type ScrapeRequest struct {
 
 // ScrapedPost represents individual post extracted by Playwright worker.
 type ScrapedPost struct {
-	URL    string `json:"url"`
-	Author string `json:"author"`
-	Text   string `json:"text"`
+	URL      string `json:"url"`
+	Author   string `json:"author"`
+	Text     string `json:"text"`
+	PostedAt string `json:"postedAt,omitempty"`
 }
 
 // ScrapeResponse represents response from worker /scrape endpoint.

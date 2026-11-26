@@ -502,13 +502,17 @@ func (o *Orchestrator) RunPipeline(
 			}
 		}
 
-		newPosts = append(newPosts, model.Post{
+		p := model.Post{
 			URL:     sp.URL,
 			Author:  sp.Author,
 			Text:    sp.Text,
 			Status:  "new",
 			FoundAt: time.Now().UTC(),
-		})
+		}
+		if sp.PostedAt != "" {
+			p.Extracted.PostedAt = sp.PostedAt
+		}
+		newPosts = append(newPosts, p)
 	}
 
 	if o.pipeline != nil && len(newPosts) > 0 {

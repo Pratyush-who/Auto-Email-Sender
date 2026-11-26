@@ -21,6 +21,21 @@ function formatCountdown(totalSec) {
   return `${h.toString().padStart(2, '0')}h ${m.toString().padStart(2, '0')}m ${s.toString().padStart(2, '0')}s`
 }
 
+function parsePostedAgeMinutes(postedAt) {
+  if (!postedAt) return Number.MAX_SAFE_INTEGER
+  const m = String(postedAt).trim().toLowerCase().match(/^(\d+)\s*(m|min|mins|h|hr|hrs|d|w|mo|yr)/)
+  if (!m) return Number.MAX_SAFE_INTEGER
+  const val = parseInt(m[1], 10)
+  const unit = m[2]
+  if (unit.startsWith('m') && !unit.startsWith('mo')) return val
+  if (unit.startsWith('h')) return val * 60
+  if (unit.startsWith('d')) return val * 1440
+  if (unit.startsWith('w')) return val * 10080
+  if (unit.startsWith('mo')) return val * 43200
+  if (unit.startsWith('y')) return val * 525600
+  return Number.MAX_SAFE_INTEGER
+}
+
 export default function AutoPage() {
   const [activeTab, setActiveTab] = useState('posts') // posts | drafts | queue | sent | replies | history | settings
 
@@ -31,7 +46,7 @@ export default function AutoPage() {
     armed: false,
     next_run_in_seconds: 7200,
     daily_sent: 0,
-    daily_cap: 30,
+    daily_cap: 100,
     last_run_at: null,
   })
   const [countdown, setCountdown] = useState(0)
@@ -53,9 +68,13 @@ export default function AutoPage() {
   const [authStatus, setAuthStatus] = useState({ connected: false, email: '' })
   const [toast, setToast] = useState('')
 
-  // Multiselect state for Drafts and Queue
+  // Multiselect state for Drafts, Queue, and Found Posts
   const [selectedDraftIds, setSelectedDraftIds] = useState([])
   const [selectedQueueIds, setSelectedQueueIds] = useState([])
+  const [selectedPostIds, setSelectedPostIds] = useState([])
+  const [dismissedAlreadyContactedIds, setDismissedAlreadyContactedIds] = useState([])
+  const [postFilter, setPostFilter] = useState('all') // all | email | phone | dm
+  const [onlyReadyToDraft, setOnlyReadyToDraft] = useState(false)
   const [editingDraftId, setEditingDraftId] = useState(null)
   const [draftEditValues, setDraftEditValues] = useState({ subject: '', body: '' })
   const [renderTimestamp, setRenderTimestamp] = useState(() => Date.now())
@@ -126,7 +145,9 @@ export default function AutoPage() {
     // Clear legacy mock state from localStorage
     try {
       localStorage.removeItem('emailauto.mock_state.v1')
-    } catch {}
+    } catch {
+      // Ignore storage access errors
+    }
 
     let ignore = false
 
@@ -180,8 +201,12 @@ export default function AutoPage() {
           const nextState = sumData.state || sumData.status || 'IDLE'
           setSummary((prev) => {
             if ((prev.state === 'RUNNING' || prev.state === 'SEARCHING') && nextState === 'IDLE') {
-              // Background or pre-refresh run just finished — reload posts, drafts, and runs
-              setTimeout(() => loadAllData(), 50)
+              // Background run just finished — stop spinner, reload posts/drafts/runs, and notify user
+              setIsRunning(false)
+              setTimeout(() => {
+                loadAllData()
+                showToast('✓ Scrape & pipeline run finished! Found Posts & Drafts updated.')
+              }, 50)
             }
             return {
               ...prev,
@@ -201,7 +226,7 @@ export default function AutoPage() {
       ignore = true
       clearInterval(pollerInterval)
     }
-  }, [])
+  }, [loadAllData])
 
   // Live 1-second countdown timer
   useEffect(() => {
@@ -214,7 +239,7 @@ export default function AutoPage() {
     return () => clearInterval(timer)
   }, [summary.auto_enabled, summary.armed])
 
-  // Live worker progress poller while scraping is active
+  // Live worker progress + live queue/posts refresh while scraping/processing is active
   useEffect(() => {
     if (!isRunning && summary.state !== 'RUNNING' && summary.state !== 'SEARCHING') {
       setScrapeProgress(null)
@@ -230,11 +255,15 @@ export default function AutoPage() {
     }
     pollProgress()
     const iv = setInterval(pollProgress, 1500)
+    const dataRefreshIv = setInterval(() => {
+      if (!cancelled) loadAllData()
+    }, 6000)
     return () => {
       cancelled = true
       clearInterval(iv)
+      clearInterval(dataRefreshIv)
     }
-  }, [isRunning, summary.state])
+  }, [isRunning, summary.state, loadAllData])
 
   // Toggle Auto Scheduler
   const handleToggleAuto = async () => {
@@ -295,20 +324,27 @@ export default function AutoPage() {
       const res = await api.triggerRun({ query: trimmedQuery, timeFilter, sortBy, maxPosts: 500 })
       setRenderTimestamp(Date.now())
 
+      if (res?.started) {
+        setSummary((prev) => ({ ...prev, state: 'RUNNING', armed: true }))
+        showToast(`⚡ Scraping LinkedIn for "${trimmedQuery}" in background — watch live progress below!`)
+        return
+      }
+
       if (res?.error || (res?.run && res.run.status === 'failed')) {
         const issue = res.run?.stats?.issue || res.run?.stats?.error || res.error || res.message || 'Scrape execution failed'
         showToast(`⚠️ Run Notice: ${issue}`)
         if (res.run) setSelectedRun(res.run)
+        setIsRunning(false)
       } else {
         const stats = res?.run?.stats || {}
         showToast(`✓ Processed ${stats.found ?? 0} posts for "${trimmedQuery}" • Verified: ${stats.verified ?? 0} • Drafted: ${stats.drafted ?? 0} • Skipped: ${stats.skipped ?? 0}`)
         if (res.run) setSelectedRun(res.run)
+        setIsRunning(false)
       }
 
       await loadAllData()
     } catch (err) {
       showToast(`Run error: ${err.message}`)
-    } finally {
       setIsRunning(false)
     }
   }
@@ -337,15 +373,15 @@ export default function AutoPage() {
   }
 
   // On-demand draft generation from a found post
-  const handleCreateDraftForPost = async (post) => {
+  const handleCreateDraftForPost = async (post, force = false) => {
     setActionLoadingId('draft_' + post.id)
     try {
-      showToast(`Generating cold email draft for ${post.company || post.role}...`)
+      showToast(`${force ? 'Creating resend draft' : 'Generating cold email draft'} for ${post.company || post.role}...`)
       const matchingContact = contacts.find(
         (c) => c.post_id === post.id || (post.extracted?.emails && post.extracted.emails.includes(c.email))
       )
       const contactId = matchingContact?.id || ''
-      const res = await api.generateDraft({ postId: post.id, contactId })
+      const res = await api.generateDraft({ postId: post.id, contactId, force })
       await loadAllData()
       setActiveTab('drafts')
       if (res?.subject) {
@@ -370,10 +406,47 @@ export default function AutoPage() {
       showToast('Clearing all discovered opportunities...')
       await api.clearAllPosts()
       setPosts([])
+      setSelectedPostIds([])
       await loadAllData()
       showToast('✓ All discovered opportunities cleared!')
     } catch (err) {
       showToast(`Error clearing posts: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  // Found Posts Multiselect & Batch Draft Handlers
+  const handleSelectPost = (id) => {
+    setSelectedPostIds((prev) =>
+      prev.includes(id) ? prev.filter((pId) => pId !== id) : [...prev, id]
+    )
+  }
+
+  const handleSelectAllPosts = (visiblePosts) => {
+    const draftableIds = visiblePosts
+      .filter((p) => p.extracted?.emails?.length > 0)
+      .map((p) => p.id)
+    if (draftableIds.length > 0 && draftableIds.every((id) => selectedPostIds.includes(id))) {
+      setSelectedPostIds([])
+    } else {
+      setSelectedPostIds(draftableIds)
+    }
+  }
+
+  const handleBulkDraftPosts = async () => {
+    if (selectedPostIds.length === 0) return
+    const count = selectedPostIds.length
+    setActionLoadingId('bulk_draft_posts')
+    showToast(`Batch drafting ${count} selected posts using Gemini...`)
+    try {
+      const res = await api.generateDraftBatch({ postIds: selectedPostIds })
+      setSelectedPostIds([])
+      await loadAllData()
+      setActiveTab('drafts')
+      showToast(`✓ Drafted ${res?.drafted ?? 0} cold emails${res?.skipped_duplicates ? ` (${res.skipped_duplicates} duplicate/existing skipped)` : ''}! Switched to Drafts & Approvals.`)
+    } catch (err) {
+      showToast(`Batch draft error: ${err.message}`)
     } finally {
       setActionLoadingId(null)
     }
@@ -419,10 +492,12 @@ export default function AutoPage() {
       const res = await api.bulkSendOutreach(selectedDraftIds)
       setSelectedDraftIds([])
       await loadAllData()
-      if (res?.sent) {
-        showToast(`✓ Successfully dispatched ${count} selected emails!`)
+      if (res?.sentCount > 0 && res?.failedCount === 0) {
+        showToast(`✓ Successfully sent ${res.sentCount} emails via Gmail!`)
+      } else if (res?.sentCount > 0 && res?.failedCount > 0) {
+        showToast(`⚠️ Sent ${res.sentCount}, failed ${res.failedCount}: ${res.reason}`)
       } else if (res?.reason) {
-        showToast(`⚠️ Send notice: ${res.reason}`)
+        showToast(`❌ Send failed (${res.failedCount || count}): ${res.reason}`)
       } else {
         showToast(`Dispatched ${count} selected emails`)
       }
@@ -457,10 +532,12 @@ export default function AutoPage() {
       const res = await api.bulkSendOutreach(selectedQueueIds)
       setSelectedQueueIds([])
       await loadAllData()
-      if (res?.sent) {
-        showToast(`✓ Successfully dispatched ${count} queued emails!`)
+      if (res?.sentCount > 0 && res?.failedCount === 0) {
+        showToast(`✓ Successfully sent ${res.sentCount} queued emails via Gmail!`)
+      } else if (res?.sentCount > 0 && res?.failedCount > 0) {
+        showToast(`⚠️ Sent ${res.sentCount}, failed ${res.failedCount}: ${res.reason}`)
       } else if (res?.reason) {
-        showToast(`⚠️ Send notice: ${res.reason}`)
+        showToast(`❌ Queue send failed (${res.failedCount || count}): ${res.reason}`)
       } else {
         showToast(`Dispatched ${count} queued emails`)
       }
@@ -631,7 +708,79 @@ export default function AutoPage() {
   const drafts = outreachList.filter((o) => o.status === 'draft')
   const queue = outreachList.filter((o) => o.status === 'queued')
   const sent = outreachList.filter((o) => o.status === 'sent')
+  const failedOutreach = outreachList.filter((o) => o.status === 'failed')
   const unrepliedSent = sent.filter((s) => !replies.some((r) => r.outreach_id === s.id))
+
+  const handleMoveFailedToDrafts = async (ids) => {
+    if (!ids || ids.length === 0) return
+    setActionLoadingId('retry_failed')
+    try {
+      for (const id of ids) {
+        await api.updateOutreach(id, { status: 'draft' })
+      }
+      await loadAllData()
+      showToast(`✓ Moved ${ids.length} failed email${ids.length > 1 ? 's' : ''} back to Drafts for review & resend`)
+    } catch (err) {
+      showToast(`Error moving failed emails: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
+
+  // Map of emails that have already received an email (sent or replied)
+  const sentEmailsMap = {}
+  for (const item of outreachList) {
+    if ((item.status === 'sent' || item.status === 'replied') && item.contact_email) {
+      const key = item.contact_email.toLowerCase().trim()
+      if (!sentEmailsMap[key]) {
+        sentEmailsMap[key] = item
+      }
+    }
+  }
+
+  // Sort discoveries latest on top (group scrape runs by 5-min window, then sort by posted_at age ascending)
+  const sortedPosts = [...posts].sort((a, b) => {
+    const bucketA = Math.floor(new Date(a.found_at).getTime() / (5 * 60 * 1000))
+    const bucketB = Math.floor(new Date(b.found_at).getTime() / (5 * 60 * 1000))
+    if (bucketB !== bucketA) return bucketB - bucketA
+    const ageA = parsePostedAgeMinutes(a.extracted?.posted_at)
+    const ageB = parsePostedAgeMinutes(b.extracted?.posted_at)
+    if (ageA !== ageB) return ageA - ageB
+    return new Date(b.found_at).getTime() - new Date(a.found_at).getTime()
+  })
+
+  // Posts whose email already received a mail previously (and don't currently have a new draft)
+  const alreadyContactedPosts = sortedPosts.filter((p) => {
+    if (dismissedAlreadyContactedIds.includes(p.id)) return false
+    const email = p.extracted?.emails?.[0]?.toLowerCase()?.trim()
+    if (!email || !sentEmailsMap[email]) return false
+    const hasActiveDraft = drafts.some(
+      (d) => d.post_id === p.id || d.contact_email?.toLowerCase()?.trim() === email
+    )
+    return !hasActiveDraft
+  })
+
+  // Sub-filter counts & filtered list for Found Posts tab
+  const isPostReadyToDraft = (p) => {
+    const email = p.extracted?.emails?.[0]?.toLowerCase()?.trim()
+    if (!email) return false
+    return !outreachList.some(
+      (o) => o.post_id === p.id || o.contact_email?.toLowerCase()?.trim() === email
+    )
+  }
+
+  const emailPostsCount = sortedPosts.filter((p) => p.extracted?.emails?.length > 0).length
+  const phonePostsCount = sortedPosts.filter((p) => p.extracted?.phones?.length > 0).length
+  const dmPostsCount = sortedPosts.filter((p) => p.extracted?.apply_via_dm).length
+  const readyToDraftCount = sortedPosts.filter(isPostReadyToDraft).length
+
+  const filteredPosts = sortedPosts.filter((p) => {
+    if (postFilter === 'email' && !(p.extracted?.emails?.length > 0)) return false
+    if (postFilter === 'phone' && !(p.extracted?.phones?.length > 0)) return false
+    if (postFilter === 'dm' && !p.extracted?.apply_via_dm) return false
+    if (onlyReadyToDraft && !isPostReadyToDraft(p)) return false
+    return true
+  })
 
   const isAllDraftsSelected = drafts.length > 0 && selectedDraftIds.length === drafts.length
 
@@ -806,17 +955,31 @@ export default function AutoPage() {
           <div style={{ flex: 1 }}>
             <h3 style={{ margin: 0, color: '#93c5fd', fontSize: '1.02rem', display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
               ⚡ Scraper & Pipeline Active: Querying "{query || scrapeProgress?.query}"
-              {scrapeProgress?.active && (
+              {scrapeProgress?.active ? (
                 <span className="pill pill-armed" style={{ fontSize: '0.78rem', padding: '0.15rem 0.55rem' }}>
-                  Scroll #{scrapeProgress.scrolls} • {scrapeProgress.extractedCount} posts found
+                  {scrapeProgress.percent ?? 10}% • Scroll #{scrapeProgress.scrolls} • {scrapeProgress.extractedCount} posts found
+                </span>
+              ) : (
+                <span className="pill pill-armed" style={{ fontSize: '0.78rem', padding: '0.15rem 0.55rem' }}>
+                  90% • Processing & Drafting Emails...
                 </span>
               )}
             </h3>
-            <p className="muted" style={{ margin: '0.25rem 0 0 0', fontSize: '0.84rem' }}>
+            <p className="muted" style={{ margin: '0.25rem 0 0.45rem 0', fontSize: '0.84rem' }}>
               {scrapeProgress?.active && scrapeProgress?.message
                 ? scrapeProgress.message
-                : 'Playwright Chrome is actively scraping LinkedIn for latest opportunities, verifying domains, and generating drafts...'}
+                : 'Extracting contacts, verifying domains, and drafting tailored cold emails in the background...'}
             </p>
+            <div style={{ width: '100%', height: '6px', background: '#1f2937', borderRadius: '999px', overflow: 'hidden' }}>
+              <div
+                style={{
+                  width: `${scrapeProgress?.active ? (scrapeProgress.percent ?? 15) : 90}%`,
+                  height: '100%',
+                  background: 'linear-gradient(90deg, #3b82f6, #22c55e)',
+                  transition: 'width 0.4s ease',
+                }}
+              />
+            </div>
           </div>
           <button
             type="button"
@@ -886,18 +1049,16 @@ export default function AutoPage() {
       {/* Tab Content 1: Found Posts */}
       {activeTab === 'posts' && (
         <section className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.8rem', flexWrap: 'wrap', gap: '0.5rem' }}>
             <div>
-              <h2 style={{ margin: 0 }}>Discovered Opportunities ({posts.length})</h2>
-              {posts.length > 0 && (
+              <h2 style={{ margin: 0 }}>Discovered Opportunities ({sortedPosts.length})</h2>
+              {sortedPosts.length > 0 && (
                 <p className="muted" style={{ margin: '0.25rem 0 0 0', fontSize: '0.84rem' }}>
-                  {posts.filter((p) => p.extracted?.emails?.length > 0).length} with Email •{' '}
-                  {posts.filter((p) => p.extracted?.phones?.length > 0).length} with Phone •{' '}
-                  {posts.filter((p) => p.extracted?.apply_via_dm).length} DM/Message Directly
+                  {emailPostsCount} with Email • {phonePostsCount} with Phone • {dmPostsCount} DM/Message Directly • {readyToDraftCount} Ready to Draft
                 </p>
               )}
             </div>
-            {posts.length > 0 && (
+            {sortedPosts.length > 0 && (
               <button
                 type="button"
                 className="btn btn-kill"
@@ -906,26 +1067,147 @@ export default function AutoPage() {
                 title="Delete all discovered opportunities from the database"
                 style={{ padding: '0.35rem 0.85rem', fontSize: '0.82rem', whiteSpace: 'nowrap' }}
               >
-                {actionLoadingId === 'clear_posts' ? '⏳ Clearing...' : `🗑 Clear All (${posts.length})`}
+                {actionLoadingId === 'clear_posts' ? '⏳ Clearing...' : `🗑 Clear All (${sortedPosts.length})`}
               </button>
             )}
           </div>
-          {posts.length === 0 ? (
-            <p className="muted">No posts discovered yet. Trigger a run above or enable Autopilot.</p>
+
+          {/* Interactive Filter Sections + Ready-to-Draft Toggle + Select All */}
+          {sortedPosts.length > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '1rem', paddingBottom: '0.8rem', borderBottom: '1px solid #27272a' }}>
+              <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap' }}>
+                {[
+                  { key: 'all', label: `All (${sortedPosts.length})` },
+                  { key: 'email', label: `✉ With Email (${emailPostsCount})` },
+                  { key: 'phone', label: `📞 With Phone (${phonePostsCount})` },
+                  { key: 'dm', label: `💬 DM / Message (${dmPostsCount})` },
+                ].map((f) => (
+                  <button
+                    key={f.key}
+                    type="button"
+                    className={postFilter === f.key ? 'btn' : 'btn btn-ghost'}
+                    style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem' }}
+                    onClick={() => setPostFilter(f.key)}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className={onlyReadyToDraft ? 'btn' : 'btn btn-ghost'}
+                  style={{
+                    fontSize: '0.78rem',
+                    padding: '0.3rem 0.75rem',
+                    borderColor: onlyReadyToDraft ? '#22c55e' : '#3f3f46',
+                    background: onlyReadyToDraft ? '#16a34a' : 'transparent',
+                    color: onlyReadyToDraft ? '#fff' : '#86efac',
+                  }}
+                  onClick={() => setOnlyReadyToDraft((prev) => !prev)}
+                  title="Show only posts that have an email and don't have a draft yet"
+                >
+                  {onlyReadyToDraft ? `✓ Ready to Draft Only (${readyToDraftCount})` : `✉ Ready to Draft Only (${readyToDraftCount})`}
+                </button>
+              </div>
+
+              {filteredPosts.some((p) => p.extracted?.emails?.length > 0) && (
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', cursor: 'pointer', fontSize: '0.84rem', fontWeight: 600 }}>
+                  <input
+                    type="checkbox"
+                    style={{ width: 'auto' }}
+                    checked={
+                      filteredPosts.some((p) => p.extracted?.emails?.length > 0) &&
+                      filteredPosts
+                        .filter((p) => p.extracted?.emails?.length > 0)
+                        .every((p) => selectedPostIds.includes(p.id))
+                    }
+                    onChange={() => handleSelectAllPosts(filteredPosts)}
+                  />
+                  Select All ({filteredPosts.filter((p) => p.extracted?.emails?.length > 0).length})
+                </label>
+              )}
+            </div>
+          )}
+
+          {/* Bulk Draft Toolbar for Selected Found Posts */}
+          {selectedPostIds.length > 0 && (
+            <div className="bulk-toolbar">
+              <span style={{ fontWeight: 700, color: '#60a5fa' }}>
+                ✓ {selectedPostIds.length} post{selectedPostIds.length > 1 ? 's' : ''} selected
+              </span>
+              <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={handleBulkDraftPosts}
+                  disabled={Boolean(actionLoadingId)}
+                >
+                  {actionLoadingId === 'bulk_draft_posts' ? '⏳ Batch Drafting...' : `✉ Draft Selected (${selectedPostIds.length})`}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => setSelectedPostIds([])}
+                  style={{ fontSize: '0.8rem' }}
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+          )}
+
+          {filteredPosts.length === 0 ? (
+            <p className="muted">
+              {sortedPosts.length === 0
+                ? 'No posts discovered yet. Trigger a run above or enable Autopilot.'
+                : 'No posts match this filter. Try switching filter tabs or turning off "Ready to Draft Only".'}
+            </p>
           ) : (
-            posts.map((post, postIdx) => (
-              <div key={post.id} className="item-card">
+            filteredPosts.map((post, postIdx) => {
+              const postEmail = post.extracted?.emails?.[0]?.toLowerCase()?.trim()
+              const prevSent = postEmail ? sentEmailsMap[postEmail] : null
+              const hasEmail = Boolean(postEmail)
+              const isSelected = selectedPostIds.includes(post.id)
+              return (
+              <div
+                key={post.id}
+                className="item-card"
+                style={{
+                  borderColor: isSelected ? '#3b82f6' : 'var(--line-1)',
+                  background: isSelected ? 'rgba(59, 130, 246, 0.04)' : '#0c0c0c',
+                }}
+              >
                 <div className="item-card-header">
-                  <div>
-                    <h3 style={{ margin: 0, fontSize: '1.05rem' }}>
-                      <span className="muted" style={{ fontSize: '0.82rem', marginRight: '0.45rem' }}>#{postIdx + 1}</span>
-                      {post.role || 'Software Developer'}
-                    </h3>
-                    <p className="muted" style={{ fontSize: '0.88rem' }}>
-                      <strong>{post.company || 'Company'}</strong> • posted by {post.author} • {new Date(post.found_at).toLocaleDateString()}
-                    </p>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
+                    {hasEmail && (
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => handleSelectPost(post.id)}
+                        style={{ marginTop: '0.25rem', width: 'auto', cursor: 'pointer' }}
+                        title="Select post for batch drafting"
+                      />
+                    )}
+                    <div>
+                      <h3 style={{ margin: 0, fontSize: '1.05rem' }}>
+                        <span className="muted" style={{ fontSize: '0.82rem', marginRight: '0.45rem' }}>#{postIdx + 1}</span>
+                        {post.role || 'Software Developer'}
+                      </h3>
+                      <p className="muted" style={{ fontSize: '0.88rem' }} title={`Scraped at ${new Date(post.found_at).toLocaleString()}`}>
+                        <strong>{post.company || 'Company'}</strong> • posted by {post.author}
+                        {post.extracted?.posted_at ? ` • 🕒 Posted ${post.extracted.posted_at} ago` : ''}
+                      </p>
+                    </div>
                   </div>
                   <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+                    {prevSent && (
+                      <span
+                        className="tag tag-remote"
+                        style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#f59e0b' }}
+                        title={`Already sent email to ${postEmail} on ${new Date(prevSent.sent_at || prevSent.updated_at).toLocaleString()}`}
+                      >
+                        ✓ Mail Already Sent ({new Date(prevSent.sent_at || prevSent.updated_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })})
+                      </span>
+                    )}
                     <span className={`tag tag-${post.paid_status || 'unknown'}`}>
                       {(post.paid_status || 'UNKNOWN').toUpperCase()}
                     </span>
@@ -996,7 +1278,12 @@ export default function AutoPage() {
                       ✉ Recipient Email: <strong>{post.extracted.emails[0]}</strong>
                     </span>
                     {(() => {
-                      const existingDraft = outreachList.find((o) => o.post_id === post.id)
+                      const existingDraft = outreachList.find(
+                        (o) => o.post_id === post.id && o.status !== 'failed' && o.status !== 'skipped'
+                      )
+                      const existingByEmail = !existingDraft && postEmail
+                        ? outreachList.find((o) => o.contact_email?.toLowerCase()?.trim() === postEmail && o.status !== 'failed' && o.status !== 'skipped')
+                        : null
                       if (existingDraft) {
                         return (
                           <button
@@ -1019,16 +1306,23 @@ export default function AutoPage() {
                         )
                       }
                       return (
-                        <button
-                          type="button"
-                          className="btn"
-                          style={{ fontSize: '0.78rem', padding: '0.25rem 0.65rem' }}
-                          onClick={() => handleCreateDraftForPost(post)}
-                          disabled={Boolean(actionLoadingId)}
-                          title="Generate a personalized cold email draft tailored to this company"
-                        >
-                          {actionLoadingId === 'draft_' + post.id ? '⏳ Drafting with AI...' : '✉ Draft Cold Email'}
-                        </button>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+                          {existingByEmail && (
+                            <span className="muted" style={{ fontSize: '0.76rem', color: '#fbbf24' }}>
+                              ℹ️ Not auto-drafted: duplicate email ({existingByEmail.status})
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="btn"
+                            style={{ fontSize: '0.78rem', padding: '0.25rem 0.65rem' }}
+                            onClick={() => handleCreateDraftForPost(post)}
+                            disabled={Boolean(actionLoadingId)}
+                            title="Generate a personalized cold email draft tailored to this company"
+                          >
+                            {actionLoadingId === 'draft_' + post.id ? '⏳ Drafting with AI...' : '✉ Draft Cold Email'}
+                          </button>
+                        </div>
                       )
                     })()}
                   </div>
@@ -1066,7 +1360,8 @@ export default function AutoPage() {
                   </div>
                 )}
               </div>
-            ))
+              )
+            })
           )}
         </section>
       )}
@@ -1199,11 +1494,24 @@ export default function AutoPage() {
                         style={{ marginTop: '0.3rem', width: 'auto', cursor: 'pointer' }}
                       />
                       <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
                           <h3 style={{ margin: 0 }}>{d.subject}</h3>
                           <span className={`pill ${d.kind === 'initial' ? 'pill-idle' : 'pill-armed'}`} style={{ fontSize: '0.68rem', padding: '0.1rem 0.4rem' }}>
                             {d.kind ? d.kind.toUpperCase() : 'INITIAL'}
                           </span>
+                          {(() => {
+                            const prev = d.contact_email ? sentEmailsMap[d.contact_email.toLowerCase().trim()] : null
+                            if (!prev) return null
+                            return (
+                              <span
+                                className="tag tag-remote"
+                                style={{ background: 'rgba(245, 158, 11, 0.16)', color: '#fbbf24', borderColor: '#f59e0b', fontSize: '0.72rem' }}
+                                title={`Previously sent "${prev.subject}" on ${new Date(prev.sent_at || prev.updated_at).toLocaleString()}`}
+                              >
+                                ⚠️ Already received mail on {new Date(prev.sent_at || prev.updated_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })} — Resend?
+                              </span>
+                            )
+                          })()}
                         </div>
                         <p className="muted" style={{ fontSize: '0.85rem', marginTop: '0.2rem' }}>
                           To: <strong>{d.contact_email}</strong> • {d.company} ({d.role})
@@ -1274,6 +1582,133 @@ export default function AutoPage() {
                 </div>
               )
             })
+          )}
+
+          {/* Dedicated Section: Failed Dispatch / Needs Retry */}
+          {failedOutreach.length > 0 && (
+            <div style={{ marginTop: '2rem', borderTop: '1px solid #27272a', paddingTop: '1.25rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.8rem' }}>
+                <div>
+                  <h3 style={{ margin: 0, color: '#f87171', fontSize: '1.02rem' }}>
+                    ⚠️ Failed Dispatch / Needs Retry ({failedOutreach.length})
+                  </h3>
+                  <p className="muted" style={{ margin: '0.2rem 0 0 0', fontSize: '0.84rem' }}>
+                    These emails failed to send via Gmail. Move them back to Drafts or retry sending directly.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ fontSize: '0.8rem', padding: '0.35rem 0.85rem' }}
+                  onClick={() => handleMoveFailedToDrafts(failedOutreach.map((f) => f.id))}
+                  disabled={Boolean(actionLoadingId)}
+                >
+                  {actionLoadingId === 'retry_failed' ? '⏳ Moving...' : `↻ Move All to Drafts (${failedOutreach.length})`}
+                </button>
+              </div>
+              {failedOutreach.map((f) => (
+                <div
+                  key={f.id}
+                  className="item-card"
+                  style={{ borderColor: 'rgba(239, 68, 68, 0.45)', background: 'rgba(239, 68, 68, 0.04)' }}
+                >
+                  <div className="item-card-header">
+                    <div>
+                      <h4 style={{ margin: 0, fontSize: '0.96rem' }}>{f.subject}</h4>
+                      <p className="muted" style={{ fontSize: '0.82rem', margin: '0.2rem 0 0 0' }}>
+                        To: <strong>{f.contact_email}</strong> • {f.company || f.role}
+                      </p>
+                      {f.error && (
+                        <p style={{ color: '#fca5a5', fontSize: '0.78rem', margin: '0.3rem 0 0 0' }}>
+                          Error: {f.error}
+                        </p>
+                      )}
+                    </div>
+                    <div className="row" style={{ gap: '0.4rem' }}>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem' }}
+                        onClick={() => handleMoveFailedToDrafts([f.id])}
+                        disabled={Boolean(actionLoadingId)}
+                      >
+                        ↻ Move to Draft
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-send-now"
+                        style={{ fontSize: '0.78rem', padding: '0.3rem 0.7rem' }}
+                        onClick={() => handleSendSingleNow(f.id)}
+                        disabled={Boolean(actionLoadingId)}
+                      >
+                        {actionLoadingId === 'send_' + f.id ? '⏳ Sending...' : '✈ Retry Send Now'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Dedicated Section: Already Received Mail Previously */}
+          {alreadyContactedPosts.length > 0 && (
+            <div style={{ marginTop: '2rem', borderTop: '1px solid #27272a', paddingTop: '1.25rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.6rem', marginBottom: '0.4rem' }}>
+                <h3 style={{ margin: 0, color: '#fbbf24', fontSize: '1.02rem' }}>
+                  📬 Already Received Mail Previously ({alreadyContactedPosts.length})
+                </h3>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ fontSize: '0.78rem', padding: '0.3rem 0.75rem', borderColor: '#f59e0b', color: '#fbbf24' }}
+                  onClick={() => {
+                    setDismissedAlreadyContactedIds((prev) => [
+                      ...prev,
+                      ...alreadyContactedPosts.map((p) => p.id),
+                    ])
+                    showToast('✓ Cleared "Already Received Mail Previously" list')
+                  }}
+                  title="Clear this list from Drafts & Approvals (keeps your Sent history intact)"
+                >
+                  🗑 Clear List ({alreadyContactedPosts.length})
+                </button>
+              </div>
+              <p className="muted" style={{ margin: '0.25rem 0 0.9rem 0', fontSize: '0.84rem' }}>
+                These contacts from your current discoveries have already received an email from you. They were skipped from auto-drafting to avoid spamming — click "Draft Resend Anyway" if you still want to send again.
+              </p>
+              {alreadyContactedPosts.map((p) => {
+                const email = p.extracted?.emails?.[0]?.toLowerCase()?.trim()
+                const prev = sentEmailsMap[email]
+                return (
+                  <div
+                    key={p.id}
+                    className="item-card"
+                    style={{ borderColor: 'rgba(245, 158, 11, 0.35)', background: 'rgba(245, 158, 11, 0.04)' }}
+                  >
+                    <div className="item-card-header">
+                      <div>
+                        <h4 style={{ margin: 0, fontSize: '0.96rem' }}>
+                          {p.role || 'Software Developer'} • {p.company || p.author}
+                        </h4>
+                        <p className="muted" style={{ fontSize: '0.82rem', margin: '0.2rem 0 0 0' }}>
+                          ✉ <strong>{email}</strong> • Previously sent: <strong>{new Date(prev.sent_at || prev.updated_at).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</strong>
+                          {prev.subject ? ` ("${prev.subject}")` : ''}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        style={{ borderColor: '#f59e0b', color: '#fbbf24', fontSize: '0.78rem', padding: '0.3rem 0.7rem', whiteSpace: 'nowrap' }}
+                        onClick={() => handleCreateDraftForPost(p, true)}
+                        disabled={Boolean(actionLoadingId)}
+                      >
+                        {actionLoadingId === 'draft_' + p.id ? '⏳ Creating...' : '↻ Draft Resend Anyway'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           )}
         </section>
       )}

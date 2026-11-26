@@ -32,7 +32,7 @@ export function buildLinkedInSearchUrl({ query, timeFilter = '24h', sortBy = 'la
  * Expands "see more" buttons and extracts post elements into clean JSON objects.
  * Supports both modern LinkedIn SDUI (LazyColumn) and legacy feed containers.
  */
-export async function extractPostsFromPage(page, existingUrls = new Set()) {
+export async function extractPostsFromPage(page, existingUrls = new Set(), existingFingerprints = new Set()) {
   // 1. Expand all visible "see more" / show more buttons instantly in the DOM
   try {
     await page.evaluate(() => {
@@ -48,7 +48,9 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
         ) {
           try {
             btn.click()
-          } catch {}
+          } catch {
+            // Ignore detached element click errors
+          }
         }
       }
     })
@@ -198,12 +200,10 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
 
       // Look for author profile or company anchor
       let authorName = ''
-      let authorUrl = ''
       const authorAnchor = allAnchors.find(a =>
         a.href && (a.href.includes('/in/') || a.href.includes('/company/'))
       )
       if (authorAnchor) {
-        authorUrl = authorAnchor.href.split('?')[0]
         const textParts = (authorAnchor.innerText || '').split('\n').map(s => s.trim()).filter(Boolean)
         if (textParts.length > 0 && textParts[0].length > 1) {
           authorName = textParts[0].replace(/•.*/, '').trim()
@@ -247,34 +247,56 @@ export async function extractPostsFromPage(page, existingUrls = new Set()) {
         }
       }
 
-      // Generate stable content-based URL if no direct permalink found (independent of DOM scroll index)
+      // Check innerHTML for any embedded LinkedIn activity/ugcPost/share URN if not found on attributes/anchors
       if (!postUrl) {
-        let hash = 0
-        const str = `${authorName}-${postText.slice(0, 160)}`
-        for (let i = 0; i < str.length; i++) {
-          hash = ((hash << 5) - hash) + str.charCodeAt(i)
-          hash |= 0
+        const htmlMatch = (card.innerHTML || '').match(/urn:li:(activity|ugcPost|share):(\d{15,25})/)
+        if (htmlMatch && htmlMatch[1] && htmlMatch[2]) {
+          postUrl = `https://www.linkedin.com/feed/update/urn:li:${htmlMatch[1]}:${htmlMatch[2]}/`
         }
-        postUrl = authorUrl
-          ? `${authorUrl}#post-${Math.abs(hash).toString(36)}`
-          : `https://www.linkedin.com/feed/post/${Math.abs(hash).toString(36)}/`
+      }
+
+      // Generate search-based post fallback URL if no direct URN exists (never link to user's profile)
+      if (!postUrl) {
+        const snippetWords = postText.replace(/\s+/g, ' ').trim().split(' ').slice(0, 8).join(' ')
+        const searchQ = `${authorName !== 'Hiring Manager' ? authorName + ' ' : ''}${snippetWords}`.trim()
+        postUrl = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(searchQ)}`
+      }
+
+      // Extract relative post time (e.g. "2h", "45m", "1d", "3d", "1w")
+      let postedAt = ''
+      const subDescEl = card.querySelector('.update-components-actor__sub-description, .feed-shared-actor__sub-description, time, span[aria-hidden="true"]')
+      const subDescText = subDescEl ? (subDescEl.innerText || subDescEl.textContent || '') : ''
+      const headerLines = rawText.split('\n').slice(0, 12).join('\n')
+      const timeSource = subDescText + '\n' + headerLines
+      const timeMatch = timeSource.match(/\b(\d+\s*(?:m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks|mo|yr)s?)(?:\s+ago)?\b(?:\s*•|\s*Edited|\s*$)/im)
+      if (timeMatch && timeMatch[1]) {
+        postedAt = timeMatch[1].replace(/\s+/g, '')
+      } else {
+        // Fallback: look for standalone "2h •" or "1d •" anywhere in the first 12 lines
+        const bulletMatch = headerLines.match(/\b(\d+\s*(?:m|h|d|w))\s*•/i)
+        if (bulletMatch && bulletMatch[1]) {
+          postedAt = bulletMatch[1].replace(/\s+/g, '')
+        }
       }
 
       results.push({
         url: postUrl,
         author: authorName,
         text: postText.trim(),
+        postedAt,
       })
     }
 
     return results
   })
 
-  // 3. Deduplicate by URL
+  // 3. Deduplicate by URL AND content fingerprint (prevents 3x nested DOM card extraction)
   const uniquePosts = []
   for (const post of rawPosts) {
-    if (!existingUrls.has(post.url)) {
+    const fingerprint = (post.text || '').replace(/\s+/g, ' ').trim().slice(0, 120).toLowerCase()
+    if (!existingUrls.has(post.url) && (!fingerprint || !existingFingerprints.has(fingerprint))) {
       existingUrls.add(post.url)
+      if (fingerprint) existingFingerprints.add(fingerprint)
       uniquePosts.push(post)
     }
   }

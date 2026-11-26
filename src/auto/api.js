@@ -50,7 +50,7 @@ export const api = {
         armed: false,
         next_run_in_seconds: 0,
         daily_sent: 0,
-        daily_cap: 30,
+        daily_cap: 100,
         last_run_at: null,
       }
     }
@@ -137,10 +137,17 @@ export const api = {
     return request(`/api/outreach/${id}/skip`, { method: 'POST' })
   },
 
-  async generateDraft({ postId, contactId }) {
+  async generateDraft({ postId, contactId, force = false }) {
     return request('/api/composer/generate', {
       method: 'POST',
-      body: JSON.stringify({ post_id: postId, contact_id: contactId }),
+      body: JSON.stringify({ post_id: postId, contact_id: contactId, force }),
+    })
+  },
+
+  async generateDraftBatch({ postIds, force = false }) {
+    return request('/api/composer/generate-batch', {
+      method: 'POST',
+      body: JSON.stringify({ post_ids: postIds, force }),
     })
   },
 
@@ -163,12 +170,25 @@ export const api = {
   },
 
   async bulkSendOutreach(ids) {
-    let lastResult = null
+    let sentCount = 0
+    let failedCount = 0
+    let lastError = ''
     for (const id of ids) {
       await this.approveOutreach(id)
-      lastResult = await this.sendNext(true)
+      const res = await this.sendNext(true)
+      if (res?.sent) {
+        sentCount++
+      } else {
+        failedCount++
+        lastError = res?.error || res?.reason || lastError || 'Failed to dispatch email'
+      }
     }
-    return lastResult || { success: true, count: ids.length }
+    return {
+      sent: sentCount > 0,
+      sentCount,
+      failedCount,
+      reason: lastError,
+    }
   },
 
   async sendOutreachNow(id) {

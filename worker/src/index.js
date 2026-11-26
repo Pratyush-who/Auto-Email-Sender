@@ -84,11 +84,13 @@ app.post('/scrape', async (req, res) => {
       userDataDir: USER_DATA_DIR,
       guardrails,
       onProgress: (prog) => {
+        const pct = Math.min(85, 10 + Math.round((prog.scroll / 45) * 75))
         liveProgress = {
           active: true,
           query: query.trim(),
           scrolls: prog.scroll,
           extractedCount: prog.extractedCount,
+          percent: pct,
           message: prog.message,
         }
       },
