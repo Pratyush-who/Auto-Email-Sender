@@ -279,8 +279,14 @@ export async function extractPostsFromPage(page, existingUrls = new Set(), exist
         }
       }
 
+      // Tag card in DOM so Playwright can resolve its "Copy link to post" menu if needed
+      const cardTag = `ea-${Date.now()}-${index}`
+      card.setAttribute('data-ea-card', cardTag)
+
       results.push({
         url: postUrl,
+        needsPermalink: !postUrl || postUrl.includes('/search/results/content/'),
+        cardTag,
         author: authorName,
         text: postText.trim(),
         postedAt,
@@ -290,14 +296,47 @@ export async function extractPostsFromPage(page, existingUrls = new Set(), exist
     return results
   })
 
-  // 3. Deduplicate by URL AND content fingerprint (prevents 3x nested DOM card extraction)
+  // 3. Resolve real https://lnkd.in/p/... permalinks via "Copy link to post" menu for new cards
   const uniquePosts = []
   for (const post of rawPosts) {
     const fingerprint = (post.text || '').replace(/\s+/g, ' ').trim().slice(0, 120).toLowerCase()
+    if (fingerprint && existingFingerprints.has(fingerprint)) {
+      continue
+    }
+
+    if (post.needsPermalink && post.cardTag) {
+      try {
+        const menuBtn = page.locator(`[data-ea-card="${post.cardTag}"] [data-view-name="feed-control-menu"]`).first()
+        if (await menuBtn.isVisible().catch(() => false)) {
+          await menuBtn.scrollIntoViewIfNeeded().catch(() => {})
+          await menuBtn.click({ timeout: 1000 }).catch(() => {})
+          const copyBtn = page.locator('div[role="menuitem"]:has-text("Copy link"), li:has-text("Copy link"), button:has-text("Copy link"), span:has-text("Copy link to post")').first()
+          await copyBtn.waitFor({ state: 'visible', timeout: 1000 }).catch(() => {})
+          if (await copyBtn.isVisible().catch(() => false)) {
+            await copyBtn.click({ timeout: 1000 }).catch(() => {})
+            await page.waitForTimeout(150)
+            const copied = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '')
+            if (copied && copied.startsWith('http')) {
+              post.url = copied.trim()
+            }
+          } else {
+            await page.keyboard.press('Escape').catch(() => {})
+          }
+        }
+      } catch {
+        await page.keyboard.press('Escape').catch(() => {})
+      }
+    }
+
     if (!existingUrls.has(post.url) && (!fingerprint || !existingFingerprints.has(fingerprint))) {
       existingUrls.add(post.url)
       if (fingerprint) existingFingerprints.add(fingerprint)
-      uniquePosts.push(post)
+      uniquePosts.push({
+        url: post.url,
+        author: post.author,
+        text: post.text,
+        postedAt: post.postedAt,
+      })
     }
   }
 

@@ -775,6 +775,10 @@ export default function AutoPage() {
   const readyToDraftCount = sortedPosts.filter(isPostReadyToDraft).length
 
   const filteredPosts = sortedPosts.filter((p) => {
+    // Hide non-hiring / #OpenToWork noise unless it has an email or phone
+    if (p.status === 'skipped' && p.skip_reason === 'post is not a hiring or job announcement' && !(p.extracted?.emails?.length > 0)) {
+      return false
+    }
     if (postFilter === 'email' && !(p.extracted?.emails?.length > 0)) return false
     if (postFilter === 'phone' && !(p.extracted?.phones?.length > 0)) return false
     if (postFilter === 'dm' && !p.extracted?.apply_via_dm) return false
@@ -1214,7 +1218,7 @@ export default function AutoPage() {
                     <span className="tag tag-remote">{(post.work_mode || 'UNKNOWN').toUpperCase()}</span>
                     {post.extracted?.is_suspicious || (post.skip_reason && post.skip_reason.includes('SPAM')) ? (
                       <span className="tag tag-bounce">⚠️ FAKE / SPAM FLAGGED</span>
-                    ) : post.status === 'skipped' ? (
+                    ) : prevSent ? null : post.status === 'skipped' ? (
                       <span className="tag tag-skipped">SKIPPED: {post.skip_reason}</span>
                     ) : (
                       <span className="tag tag-paid">EXTRACTED</span>

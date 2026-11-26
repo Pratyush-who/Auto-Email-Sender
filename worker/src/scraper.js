@@ -68,6 +68,7 @@ export async function scrapeLinkedInPosts({
       })
     }
     currentActiveContext = context
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']).catch(() => {})
 
     page = context.pages().length > 0 ? context.pages()[0] : await context.newPage()
 

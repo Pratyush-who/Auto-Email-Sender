@@ -125,21 +125,27 @@ func ExtractPostWithRegex(postText string) *PostExtractionResult {
 		}
 	}
 
+	// Normalize curly apostrophes so phrases like "I’m" match "I'm"
+	normalizedLower := strings.ReplaceAll(lowerText, "’", "'")
+
 	// Reject job-seeker posts (#OpenToWork) that appear in hiring searches
 	jobSeekerTerms := []string{
 		"open to work", "#opentowork", "exploring new career opportunities",
 		"looking for opportunities", "seeking new opportunities", "immediate joiner",
 		"available for immediate", "refer me", "looking for my next", "i'm currently exploring",
-		"i am currently exploring", "my project experience",
+		"i am currently exploring", "my project experience", "i'm currently open to",
+		"i am currently open to", "happy to share my cv", "if your company is looking",
+		"looking for software engineer", "open to full-time", "open to remote",
 	}
-	explicitCompanyHiring := strings.Contains(lowerText, "we are hiring") ||
-		strings.Contains(lowerText, "we're hiring") ||
-		strings.Contains(lowerText, "join our team") ||
-		strings.Contains(lowerText, "send your cv") ||
-		strings.Contains(lowerText, "send your resume")
+	explicitCompanyHiring := strings.Contains(normalizedLower, "we are hiring") ||
+		strings.Contains(normalizedLower, "we're hiring") ||
+		strings.Contains(normalizedLower, "we are #hiring") ||
+		strings.Contains(normalizedLower, "join our team") ||
+		strings.Contains(normalizedLower, "send your cv") ||
+		strings.Contains(normalizedLower, "send your resume")
 	if !explicitCompanyHiring {
 		for _, jsTerm := range jobSeekerTerms {
-			if strings.Contains(lowerText, jsTerm) {
+			if strings.Contains(normalizedLower, jsTerm) {
 				isHiring = false
 				break
 			}
