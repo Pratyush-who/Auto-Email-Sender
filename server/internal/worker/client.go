@@ -66,7 +66,7 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // Scrapes can take up to a few minutes with human delays
+			Timeout: 25 * time.Minute, // Large scrapes (up to 500 posts) with human delays can take 10-20 minutes; Kill Switch cancels via ctx
 		},
 	}
 }

@@ -145,7 +145,7 @@ func (r *OutreachRepository) ListOutreach(ctx context.Context, filter model.Outr
 		JOIN contacts c ON o.contact_id = c.id
 		LEFT JOIN posts p ON o.post_id = p.id
 		%s
-		ORDER BY o.created_at DESC
+		ORDER BY COALESCE(o.sent_at, o.created_at) DESC, o.created_at DESC
 		LIMIT $%d OFFSET $%d
 	`, whereClause, argIdx, argIdx+1)
 

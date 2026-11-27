@@ -707,9 +707,89 @@ export default function AutoPage() {
   // Buckets
   const drafts = outreachList.filter((o) => o.status === 'draft')
   const queue = outreachList.filter((o) => o.status === 'queued')
-  const sent = outreachList.filter((o) => o.status === 'sent')
+  const sent = [...outreachList.filter((o) => o.status === 'sent')].sort(
+    (a, b) => new Date(b.sent_at || b.updated_at || b.created_at) - new Date(a.sent_at || a.updated_at || a.created_at)
+  )
   const failedOutreach = outreachList.filter((o) => o.status === 'failed')
   const unrepliedSent = sent.filter((s) => !replies.some((r) => r.outreach_id === s.id))
+
+  // Group sent emails datewise (local calendar date, newest day & newest time first)
+  const sentByDate = (() => {
+    const groups = new Map()
+    const now = new Date()
+    const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+    const yest = new Date(now)
+    yest.setDate(yest.getDate() - 1)
+    const yesterdayKey = `${yest.getFullYear()}-${String(yest.getMonth() + 1).padStart(2, '0')}-${String(yest.getDate()).padStart(2, '0')}`
+
+    for (const item of sent) {
+      const dt = new Date(item.sent_at || item.updated_at || item.created_at)
+      const key = Number.isNaN(dt.getTime())
+        ? 'unknown'
+        : `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`
+      if (!groups.has(key)) {
+        let label = 'Unknown Date'
+        if (key !== 'unknown') {
+          const formatted = dt.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+          label = key === todayKey ? `Today — ${formatted}` : key === yesterdayKey ? `Yesterday — ${formatted}` : formatted
+        }
+        groups.set(key, { dateKey: key, label, items: [] })
+      }
+      groups.get(key).items.push(item)
+    }
+    return Array.from(groups.values())
+  })()
+
+  const handleResendDay = async (group, sendImmediately = true) => {
+    if (!group?.items?.length) return
+    const uniqueCount = new Set(group.items.map((i) => (i.contact_email || i.id).toLowerCase().trim())).size
+    if (sendImmediately) {
+      const confirmed = window.confirm(
+        `Resend all ${uniqueCount} unique email${uniqueCount > 1 ? 's' : ''} from "${group.label}" right now via Gmail?`
+      )
+      if (!confirmed) return
+    }
+
+    const loadKey = `${sendImmediately ? 'resend_now' : 'resend_draft'}_${group.dateKey}`
+    setActionLoadingId(loadKey)
+    showToast(
+      sendImmediately
+        ? `Preparing and sending ${uniqueCount} emails from ${group.label}...`
+        : `Creating resend drafts for ${uniqueCount} emails from ${group.label}...`
+    )
+    try {
+      const batchRes = await api.resendOutreachBatch(
+        group.items.map((i) => i.id),
+        sendImmediately
+      )
+      const createdIds = (batchRes?.created || []).map((c) => c.id).filter(Boolean)
+      if (createdIds.length === 0) {
+        showToast('No emails could be queued for resend.')
+        return
+      }
+
+      if (sendImmediately) {
+        const sendRes = await api.bulkSendOutreach(createdIds)
+        await loadAllData()
+        if (sendRes?.sentCount > 0 && sendRes?.failedCount === 0) {
+          showToast(`✓ Resent ${sendRes.sentCount} emails from ${group.label}!`)
+        } else if (sendRes?.sentCount > 0) {
+          showToast(`⚠️ Resent ${sendRes.sentCount}, failed ${sendRes.failedCount}: ${sendRes.reason}`)
+        } else {
+          showToast(`❌ Resend failed: ${sendRes?.reason || 'Unknown error'}`)
+        }
+      } else {
+        await loadAllData()
+        setSelectedDraftIds(createdIds)
+        setActiveTab('drafts')
+        showToast(`✓ Created ${createdIds.length} resend drafts from ${group.label}. Review & send from Drafts!`)
+      }
+    } catch (err) {
+      showToast(`Resend day error: ${err.message}`)
+    } finally {
+      setActionLoadingId(null)
+    }
+  }
 
   const handleMoveFailedToDrafts = async (ids) => {
     if (!ids || ids.length === 0) return
@@ -1893,28 +1973,89 @@ export default function AutoPage() {
       {/* Tab Content 4: Sent */}
       {activeTab === 'sent' && (
         <section className="card">
-          <h2>Sent Emails ({sent.length})</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.8rem' }}>
+            <h2 style={{ margin: 0 }}>Sent Emails ({sent.length})</h2>
+            <span className="muted" style={{ fontSize: '0.85rem' }}>Grouped by send date • Ordered newest first</span>
+          </div>
           {sent.length === 0 ? (
             <p className="muted">No sent emails recorded yet.</p>
           ) : (
-            sent.map((s) => (
-              <div key={s.id} className="item-card">
-                <div className="item-card-header">
-                  <div>
-                    <h3 style={{ margin: 0 }}>{s.subject}</h3>
-                    <p className="muted" style={{ fontSize: '0.85rem' }}>
-                      To: <strong>{s.contact_email}</strong> • {s.company} • Sent {new Date(s.sent_at).toLocaleString()}
-                    </p>
+            <div style={{ display: 'grid', gap: '1.2rem' }}>
+              {sentByDate.map((group) => {
+                const newestTime = new Date(
+                  group.items[0].sent_at || group.items[0].updated_at || group.items[0].created_at
+                ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                const oldestItem = group.items[group.items.length - 1]
+                const oldestTime = new Date(
+                  oldestItem.sent_at || oldestItem.updated_at || oldestItem.created_at
+                ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                const timeSpan = group.items.length > 1 && oldestTime !== newestTime ? `${oldestTime} – ${newestTime}` : newestTime
+                const isSendingDay = actionLoadingId === `resend_now_${group.dateKey}`
+                const isDraftingDay = actionLoadingId === `resend_draft_${group.dateKey}`
+
+                return (
+                  <div key={group.dateKey} style={{ border: '1px solid #2b2f3a', borderRadius: '10px', padding: '1rem', background: 'rgba(255,255,255,0.02)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.85rem', paddingBottom: '0.65rem', borderBottom: '1px solid #2b2f3a' }}>
+                      <div>
+                        <h3 style={{ margin: 0, fontSize: '1.05rem' }}>
+                          📅 {group.label} <span className="badge" style={{ marginLeft: '0.4rem' }}>{group.items.length}</span>
+                        </h3>
+                        <p className="muted" style={{ margin: '0.2rem 0 0', fontSize: '0.82rem' }}>
+                          Sent between {timeSpan}
+                        </p>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={Boolean(actionLoadingId)}
+                          onClick={() => handleResendDay(group, false)}
+                          title="Clone this day's emails into Drafts for review before sending"
+                        >
+                          {isDraftingDay ? '⏳ Drafting...' : `📝 Draft Resend (${group.items.length})`}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          disabled={Boolean(actionLoadingId)}
+                          onClick={() => handleResendDay(group, true)}
+                          title="Immediately resend all emails from this date via Gmail"
+                        >
+                          {isSendingDay ? '⏳ Sending...' : `↻ Resend Whole Day (${group.items.length})`}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gap: '0.65rem' }}>
+                      {group.items.map((s) => {
+                        const sentTime = new Date(s.sent_at || s.updated_at || s.created_at).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })
+                        return (
+                          <div key={s.id} className="item-card" style={{ margin: 0 }}>
+                            <div className="item-card-header">
+                              <div>
+                                <h3 style={{ margin: 0, fontSize: '0.98rem' }}>{s.subject}</h3>
+                                <p className="muted" style={{ fontSize: '0.84rem', margin: '0.25rem 0 0' }}>
+                                  To: <strong>{s.contact_email}</strong> • {s.company || 'Unknown company'} • 🕒 {sentTime}
+                                </p>
+                              </div>
+                              <span className="tag tag-paid">DELIVERED</span>
+                            </div>
+                            {s.gmail_message_id ? (
+                              <p className="muted" style={{ fontSize: '0.76rem', margin: '0.35rem 0 0' }}>
+                                Gmail Message ID: <code>{s.gmail_message_id}</code>
+                              </p>
+                            ) : null}
+                          </div>
+                        )
+                      })}
+                    </div>
                   </div>
-                  <span className="tag tag-paid">DELIVERED</span>
-                </div>
-                {s.gmail_message_id ? (
-                  <p className="muted" style={{ fontSize: '0.78rem' }}>
-                    Gmail Message ID: <code>{s.gmail_message_id}</code>
-                  </p>
-                ) : null}
-              </div>
-            ))
+                )
+              })}
+            </div>
           )}
         </section>
       )}

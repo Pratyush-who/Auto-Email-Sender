@@ -506,3 +506,67 @@ func (h *OutreachHandler) GenerateOutreachBatch(w http.ResponseWriter, r *http.R
 		"drafts":             createdDrafts,
 	})
 }
+
+// ResendOutreachBatch handles POST /api/outreach/resend-batch to clone a day's sent outreach emails into fresh drafts/queued items for resending.
+func (h *OutreachHandler) ResendOutreachBatch(w http.ResponseWriter, r *http.Request) {
+	if h.outreachStore == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "outreach store is not configured"})
+		return
+	}
+
+	var payload struct {
+		OutreachIDs      []string `json:"outreach_ids"`
+		QueueImmediately bool     `json:"queue_immediately"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
+		return
+	}
+	if len(payload.OutreachIDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "outreach_ids cannot be empty"})
+		return
+	}
+
+	status := model.OutreachStatusDraft
+	if payload.QueueImmediately {
+		status = model.OutreachStatusQueued
+	}
+
+	seenEmails := make(map[string]bool)
+	createdItems := make([]model.Outreach, 0, len(payload.OutreachIDs))
+
+	for _, id := range payload.OutreachIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		orig, err := h.outreachStore.GetOutreachByID(r.Context(), id)
+		if err != nil || orig == nil {
+			continue
+		}
+		emailKey := strings.ToLower(strings.TrimSpace(orig.ContactEmail))
+		if emailKey != "" && seenEmails[emailKey] {
+			continue
+		}
+		if emailKey != "" {
+			seenEmails[emailKey] = true
+		}
+
+		created, err := h.outreachStore.CreateOutreach(r.Context(), &model.Outreach{
+			ContactID: orig.ContactID,
+			PostID:    orig.PostID,
+			Kind:      orig.Kind,
+			Subject:   orig.Subject,
+			Body:      orig.Body,
+			Status:    status,
+		})
+		if err == nil && created != nil {
+			createdItems = append(createdItems, *created)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count":   len(createdItems),
+		"created": createdItems,
+	})
+}

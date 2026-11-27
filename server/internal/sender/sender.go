@@ -269,24 +269,27 @@ func (s *Sender) SendNext(ctx context.Context, force bool) (*SendResult, error) 
 
 	target := pending[0]
 
-	// 5. Guardrail: Never send initial if another initial exists or was already sent for this contact
-	if target.Kind == model.OutreachKindInitial {
-		hasExisting, err := s.outreachStore.HasExistingInitialOutreach(ctx, target.ContactID, target.ID)
-		if err == nil && hasExisting {
-			reason := "initial outreach already exists or was sent for this contact"
+	// 5-6. Duplicate & cooldown guardrails (skipped when force=true for explicit manual resends)
+	if !force {
+		// 5. Guardrail: Never send initial if another initial exists or was already sent for this contact
+		if target.Kind == model.OutreachKindInitial {
+			hasExisting, err := s.outreachStore.HasExistingInitialOutreach(ctx, target.ContactID, target.ID)
+			if err == nil && hasExisting {
+				reason := "initial outreach already exists or was sent for this contact"
+				s.logger.Warn("skipping outreach", "outreach_id", target.ID, "reason", reason)
+				_ = s.outreachStore.UpdateStatus(ctx, target.ID, model.OutreachStatusSkipped, "", "", reason, nil)
+				return &SendResult{OutreachID: target.ID, Skipped: true, Reason: reason}, nil
+			}
+		}
+
+		// 6. Guardrail: Never email the same address or same company twice within 30 days
+		hasRecent, err := s.outreachStore.HasSentToAddressOrCompanyWithinDays(ctx, target.ContactEmail, target.Company, 30)
+		if err == nil && hasRecent {
+			reason := fmt.Sprintf("email (%s) or company (%s) already contacted within the last 30 days", target.ContactEmail, target.Company)
 			s.logger.Warn("skipping outreach", "outreach_id", target.ID, "reason", reason)
 			_ = s.outreachStore.UpdateStatus(ctx, target.ID, model.OutreachStatusSkipped, "", "", reason, nil)
 			return &SendResult{OutreachID: target.ID, Skipped: true, Reason: reason}, nil
 		}
-	}
-
-	// 6. Guardrail: Never email the same address or same company twice within 30 days
-	hasRecent, err := s.outreachStore.HasSentToAddressOrCompanyWithinDays(ctx, target.ContactEmail, target.Company, 30)
-	if err == nil && hasRecent {
-		reason := fmt.Sprintf("email (%s) or company (%s) already contacted within the last 30 days", target.ContactEmail, target.Company)
-		s.logger.Warn("skipping outreach", "outreach_id", target.ID, "reason", reason)
-		_ = s.outreachStore.UpdateStatus(ctx, target.ID, model.OutreachStatusSkipped, "", "", reason, nil)
-		return &SendResult{OutreachID: target.ID, Skipped: true, Reason: reason}, nil
 	}
 
 	// 7. Attach candidate resume PDF if present

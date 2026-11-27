@@ -121,12 +121,20 @@ export const api = {
 
   async getOutreach(status) {
     try {
-      const query = status ? `?status=${status}` : ''
-      const data = await request(`/api/outreach${query}`)
+      const params = new URLSearchParams({ limit: '500' })
+      if (status) params.set('status', status)
+      const data = await request(`/api/outreach?${params.toString()}`)
       return Array.isArray(data) ? data : []
     } catch {
       return []
     }
+  },
+
+  async resendOutreachBatch(outreachIds, queueImmediately = false) {
+    return request('/api/outreach/resend-batch', {
+      method: 'POST',
+      body: JSON.stringify({ outreach_ids: outreachIds, queue_immediately: queueImmediately }),
+    })
   },
 
   async approveOutreach(id) {
